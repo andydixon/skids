@@ -170,6 +170,74 @@ pub fn read_ilbm(d: &[u8]) -> Result<Picture, String> {
     })
 }
 
+/// Reads a bank of hardware sprites saved by the game (`gfx/ball.spr`) as
+/// one picture sheet, 16 frames across.
+///
+/// Each frame is a 16-byte header (BE32 saved pointer, BE16 lines, BE16
+/// strip count, BE16 flags, BE16 bytes per strip, 4 unused) followed by the
+/// strips: 16-pixel sprites with two bitplane words per line. With flag bit
+/// 15 set, strips pair up as attached sprites (16 colours, 16 pixels per
+/// pair); otherwise each strip is a 4-colour, 16-pixel column. The bank
+/// carries no colours, so the sheet gets a grey ramp.
+pub fn read_sprite_bank(d: &[u8]) -> Result<Picture, String> {
+    if d.len() < 16 {
+        return Err("too short for a sprite bank".into());
+    }
+    let lines = be16(d, 4) as usize;
+    let strips = be16(d, 6) as usize;
+    let attached = be16(d, 8) & 0x8000 != 0 && strips.is_multiple_of(2);
+    let per_strip = be16(d, 10) as usize;
+    if lines == 0 || strips == 0 || per_strip != lines * 4 {
+        return Err("not a sprite bank".into());
+    }
+    let record = 16 + strips * per_strip;
+    let frames = d.len() / record;
+    let fw = if attached {
+        strips / 2 * 16
+    } else {
+        strips * 16
+    };
+    let (cols, rows) = (frames.min(16), frames.div_ceil(16));
+    let (w, h) = (cols * fw, rows * lines);
+    let mut pixels = vec![0u8; w * h];
+    for f in 0..frames {
+        let r = &d[f * record..(f + 1) * record];
+        if be16(r, 4) as usize != lines || be16(r, 6) as usize != strips {
+            return Err(format!("frame {f} has a different size"));
+        }
+        let strip_px = |s: usize, x: usize, y: usize| -> u8 {
+            let o = 16 + s * per_strip + y * 4;
+            let bit = 0x8000 >> x;
+            ((be16(r, o) & bit != 0) as u8) | (((be16(r, o + 2) & bit != 0) as u8) << 1)
+        };
+        let (ox, oy) = ((f % 16) * fw, (f / 16) * lines);
+        for y in 0..lines {
+            for x in 0..fw {
+                let v = if attached {
+                    let pair = x / 16;
+                    strip_px(pair * 2, x % 16, y) | (strip_px(pair * 2 + 1, x % 16, y) << 2)
+                } else {
+                    strip_px(x / 16, x % 16, y)
+                };
+                pixels[(oy + y) * w + ox + x] = v;
+            }
+        }
+    }
+    let n = if attached { 16 } else { 4 };
+    let palette = (0..n)
+        .map(|i| {
+            let v = (i * 255 / (n - 1)) as u8;
+            (v, v, v)
+        })
+        .collect();
+    Ok(Picture {
+        w,
+        h,
+        pixels,
+        palette,
+    })
+}
+
 /// Writes 8-bit unsigned mono WAV, with the loop start in a `smpl` chunk so
 /// sample editors keep it.
 pub fn sound_to_wav(s: &Sound) -> Vec<u8> {
@@ -275,6 +343,23 @@ mod tests {
         };
         let back = wav_to_sound(&sound_to_wav(&s)).unwrap();
         assert_eq!(back, s);
+    }
+
+    #[test]
+    fn attached_sprite_bank() {
+        // One frame: 1 line, 2 attached strips; pixel 0 uses all four planes.
+        let mut d = vec![0u8; 16 + 2 * 4];
+        d[5] = 1;
+        d[7] = 2;
+        d[8] = 0x80;
+        d[11] = 4;
+        for o in [16, 18, 20, 22] {
+            d[o] = 0x80;
+        }
+        let p = read_sprite_bank(&d).unwrap();
+        assert_eq!((p.w, p.h), (16, 1));
+        assert_eq!(p.pixels[0], 15);
+        assert_eq!(p.pixels[1], 0);
     }
 
     #[test]

@@ -299,8 +299,14 @@ impl GameData {
         let mut t = match &entry.source {
             TrackSource::Asset { png, txt } => {
                 let txt = String::from_utf8_lossy(self.files.get(txt).unwrap_or_default());
-                Track::from_assets(&entry.name, self.files.get(png).unwrap_or_default(), &txt)
-                    .map_err(|e| format!("{}: {e}", entry.name))?
+                let mut t =
+                    Track::from_assets(&entry.name, self.files.get(png).unwrap_or_default(), &txt)
+                        .map_err(|e| format!("{}: {e}", entry.name))?;
+                let thumb = png.replace("/track.png", "/thumb.png");
+                if let Some(d) = self.files.get(&thumb) {
+                    t.set_thumb_png(d).map_err(|e| format!("{thumb}: {e}"))?;
+                }
+                t
             }
             TrackSource::Packed { file, section } => self.track_files[*file].decode(*section)?,
         };
@@ -380,6 +386,16 @@ fn load_media(files: &FileSet, warnings: &mut Vec<String>) -> Media {
                     }
                     Err(e) => warnings.push(format!("{key}: {e}")),
                 }
+            }
+        }
+    }
+    for (key, data) in &files.files {
+        if let Some(name) = stem(key, "gfx", ".spr") {
+            match iff::read_sprite_bank(data) {
+                Ok(p) => {
+                    pictures.insert(name, p);
+                }
+                Err(e) => warnings.push(format!("{key}: {e}")),
             }
         }
     }

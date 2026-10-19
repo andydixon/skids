@@ -58,7 +58,7 @@ consumed to its first byte.
 
 ```
 0x00  7 × u32   end offset of sections 0..6
-0x1C  …         section 0: header for the whole file (20622 bytes, raw)
+0x1C  …         section 0: thumbnails and palette for the whole file (20622 bytes, raw)
 …               sections 1..6: one track each, CrunchMania-packed
 ```
 
@@ -73,8 +73,16 @@ The last 142 bytes of section 0 hold:
 | 98     | 12   | Unknown |
 | 110    | …    | The name of the set of tracks, NUL-terminated |
 
-The rest of section 0 is the track-selector thumbnails, which aren't
-decoded.
+The first 20480 bytes of section 0 are the track-selector thumbnails:
+- **Picture:** one 640 × 64, 16-colour picture in the file's palette,
+  stored as four bitplanes one after another (80 bytes per row, 5120 bytes
+  per plane).
+- **Layout:** the six tracks' thumbnails, 123 × 32 each, sit in a 3 × 2
+  grid at its top left, in track order: top row tracks 1–3, bottom row
+  4–6.
+- **Display:** the picture is Amiga hi-res, whose pixels are half as wide
+  as low-res ones. So a thumbnail shows at 123 × 64 next to the low-res
+  track pictures, the same shape as the track.
 
 Each track section unpacks to 281240 (`0x44A98`) bytes:
 
@@ -166,7 +174,18 @@ extra and alternative sounds (`crash1`, `crash2`, `engine`, `motor`,
 
 IFF ILBM with ByteRun1 compression. `skidtoon.iff` is the 608 × 180,
 16-colour title picture; `chat2`, `mouse` and `sign` are small odds and
-ends. `ball.spr` (34816 bytes) is in another format and isn't decoded.
+ends.
+
+`ball.spr` is a bank of 64 saved hardware sprites: a spinning ball with
+the Acid logo. Each 544-byte frame is:
+
+- **Header** (16 bytes): `u32` saved memory pointer, `u16` lines (33),
+  `u16` strips (4), `u16` flags (`0x8020`), `u16` bytes per strip (132),
+  4 unused bytes.
+- **Strips:** four 16-pixel sprites, each line two bitplane words.
+
+Flag bit 15 marks attached sprites. The strips pair up into two 16-colour
+columns, so a frame is 32 × 33 pixels. The bank carries no colours.
 
 ## Music (`sfx/tune.crn`)
 
@@ -202,8 +221,8 @@ first minute), and it loops at the same point.
   decoded; this port's versions are reconstructions. Decoding the `.set`
   values would be the first step towards the original handling.
 - **Unknown data:** the 12 bytes after each track file's palette, the bit
-  pattern after the gates in each track section, the thumbnails, and
-  `ball.spr`.
+  pattern after the gates in each track section, and the colours of
+  `ball.spr` (probably set by the executable).
 
 The engine's own editable formats, which `skids extract` converts all of
 the above into, are described in [assets/README.md](../assets/README.md).

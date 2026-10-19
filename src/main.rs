@@ -3,6 +3,17 @@
 //! The engine reads the original Amiga data (ADF images, the LHA archives on
 //! them, or extracted files) at run time; no game assets are bundled.
 
+/// Like `println!`, but a closed pipe (e.g. `skids info | head`) ends the
+/// program quietly instead of panicking.
+macro_rules! out {
+    ($($arg:tt)*) => {{
+        use std::io::Write;
+        if writeln!(std::io::stdout(), $($arg)*).is_err() {
+            std::process::exit(0);
+        }
+    }};
+}
+
 mod app;
 mod audio;
 mod data;
@@ -202,24 +213,24 @@ fn main() -> ExitCode {
 fn info(data: &GameData, dir: Option<&Path>) {
     let built_in = data::embedded::files().len();
     match (built_in, dir) {
-        (0, Some(d)) => println!("Data: {}", d.display()),
-        (n, Some(d)) => println!("Data: built in ({n} files), plus {}", d.display()),
-        (n, None) => println!("Data: built in ({n} files)"),
+        (0, Some(d)) => out!("Data: {}", d.display()),
+        (n, Some(d)) => out!("Data: built in ({n} files), plus {}", d.display()),
+        (n, None) => out!("Data: built in ({n} files)"),
     }
-    println!("Tracks:");
+    out!("Tracks:");
     for (i, entry) in data.tracks.iter().enumerate() {
         let from = match entry.source {
             data::TrackSource::Asset { .. } => "asset",
             data::TrackSource::Packed { .. } => "original data",
         };
         match data.load_track(i) {
-            Ok(t) => println!("  {:<10} {:>2} gates  ({from})", t.name, t.gates.len()),
-            Err(e) => println!("  {:<10} ERROR {e}", entry.name),
+            Ok(t) => out!("  {:<10} {:>2} gates  ({from})", t.name, t.gates.len()),
+            Err(e) => out!("  {:<10} ERROR {e}", entry.name),
         }
     }
-    println!("Vehicles:");
+    out!("Vehicles:");
     for v in &data.vehicles {
-        println!("  {:<10} ({})", v.name, v.id);
+        out!("  {:<10} ({})", v.name, v.id);
     }
 }
 
@@ -263,7 +274,7 @@ fn unpack(input: &Path, out: Option<&Path>) -> Result<(), String> {
         let dest = out.join(safe);
         std::fs::create_dir_all(dest.parent().unwrap()).map_err(|e| e.to_string())?;
         std::fs::write(&dest, &data).map_err(|e| format!("{}: {e}", dest.display()))?;
-        println!("{:>8}  {}", data.len(), path);
+        out!("{:>8}  {}", data.len(), path);
     }
     if failed > 0 {
         return Err(format!("{failed} files could not be extracted"));
@@ -299,7 +310,10 @@ fn extract(data: &GameData, out: Option<&Path>) -> Result<(), String> {
         }
         write(dir.join("track.png"), &png)?;
         write(dir.join("track.txt"), txt.as_bytes())?;
-        println!("wrote {}", dir.display());
+        if let Some(thumb) = t.thumb_png() {
+            write(dir.join("thumb.png"), &thumb?)?;
+        }
+        out!("wrote {}", dir.display());
     }
     for v in &data.vehicles {
         let (png, txt) = (v.sheet_png()?, v.settings_text());
@@ -313,7 +327,7 @@ fn extract(data: &GameData, out: Option<&Path>) -> Result<(), String> {
         if let Some(menu) = v.menu_png() {
             write(dir.join(format!("{}-menu.png", v.id)), &menu?)?;
         }
-        println!("wrote {}", dir.join(&v.id).display());
+        out!("wrote {}", dir.join(&v.id).display());
     }
     for (name, s) in &data.sounds {
         let wav = formats::iff::sound_to_wav(s);
@@ -323,13 +337,13 @@ fn extract(data: &GameData, out: Option<&Path>) -> Result<(), String> {
         }
         let path = out.join("sounds").join(format!("{name}.wav"));
         write(path.clone(), &wav)?;
-        println!("wrote {}", path.display());
+        out!("wrote {}", path.display());
     }
     if let Some((name, med)) = &data.music {
         formats::med::parse(med).map_err(|e| format!("music {name}: {e}"))?;
         let path = out.join("music").join(format!("{name}.med"));
         write(path.clone(), med)?;
-        println!("wrote {}", path.display());
+        out!("wrote {}", path.display());
     }
     for (name, p) in &data.pictures {
         let pal: Vec<data::palette::Rgb> = p
@@ -343,7 +357,7 @@ fn extract(data: &GameData, out: Option<&Path>) -> Result<(), String> {
         }
         let path = out.join("gfx").join(format!("{name}.png"));
         write(path.clone(), &png)?;
-        println!("wrote {}", path.display());
+        out!("wrote {}", path.display());
     }
     Ok(())
 }
@@ -394,7 +408,7 @@ fn render_shot(data: GameData, args: &Args) -> Result<(), String> {
     let n = race.track.gates.len();
     for &i in &race.standings() {
         let e = &race.entrants[i];
-        println!(
+        out!(
             "{:<10} laps {} gates {} best {:?}",
             e.name,
             e.laps_done(n),
@@ -402,7 +416,7 @@ fn render_shot(data: GameData, args: &Args) -> Result<(), String> {
             e.best_lap
         );
     }
-    println!("wrote {}", out.display());
+    out!("wrote {}", out.display());
     Ok(())
 }
 
@@ -415,9 +429,13 @@ fn bench(data: GameData, args: &Args) -> Result<(), String> {
     };
     app.settings.caravans = args.caravans;
     let frames = (args.seconds / game::DT) as usize;
-    println!(
+    out!(
         "{:<10} {:>5} {:>8} {:>9} {:>8}",
-        "TRACK", "GATES", "LAPS", "BEST LAP", "ON ROAD"
+        "TRACK",
+        "GATES",
+        "LAPS",
+        "BEST LAP",
+        "ON ROAD"
     );
     for ti in 0..app.data.tracks.len() {
         let mut race = app.build_race(ti, 0, [0, 0], 4, 99, ti as u32 + 1)?;
@@ -445,7 +463,7 @@ fn bench(data: GameData, args: &Args) -> Result<(), String> {
         } else {
             app::fmt_time(best)
         };
-        println!(
+        out!(
             "{:<10} {:>5} {:>8} {:>9} {:>7.0}%",
             race.track.name,
             n,
@@ -494,7 +512,7 @@ fn render_music(data: &GameData, args: &Args) -> Result<(), String> {
     let n = (wav.len() - 8) as u32;
     wav[4..8].copy_from_slice(&n.to_le_bytes());
     std::fs::write(&out, wav).map_err(|e| e.to_string())?;
-    println!(
+    out!(
         "wrote {} ({:.0} s, peak {:.2}, position {})",
         out.display(),
         args.seconds,
@@ -502,7 +520,7 @@ fn render_music(data: &GameData, args: &Args) -> Result<(), String> {
         player.position()
     );
     if let Some(t) = wrapped_at {
-        println!(
+        out!(
             "the song loops back to the start after {}:{:04.1}",
             (t / 60.0) as u32,
             t % 60.0
@@ -556,7 +574,7 @@ fn trace(data: GameData, args: &Args) -> Result<(), String> {
     }
     let n = race.track.gates.len();
     for e in &race.entrants {
-        println!(
+        out!(
             "{:<8} laps {} next gate {}",
             e.name,
             e.laps_done(n),
