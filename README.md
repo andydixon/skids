@@ -3,14 +3,24 @@
 A cross-platform (Windows, macOS, Linux) engine written in Rust that plays
 *Super Skidmarks* (Acid Software, 1995) on the original Amiga data.
 
-At build time it reads the game's ADF disk images from this repository:
-it unpacks the LHA archives on them and builds the game files into the
-executable. At run time it decrunches the CrunchMania-packed files and
-decodes the planar track graphics and AGA sprite banks. The finished
-program is a single self-contained file, with no disks needed to play.
+The game's data was converted from the original ADF disk images (disks 2–6
+of the six-disk set) into editable files in [`assets/`](assets/README.md).
+The images themselves are no longer kept in this repository.
 
-Because the binary carries the original game data, anyone you give a build
-to also gets the game data.
+- **Each track:** a 16-colour PNG (the PNG's palette is the track's
+  palette), plus a text file with the lap gates and height map.
+- **Each car:** a PNG sprite sheet, plus a text file with its name and
+  handling.
+
+Edit them with any image editor or text editor. The build embeds the
+`assets/` folder, so the finished program is a single self-contained file.
+
+The engine can still read the original disks directly: ADF images, the LHA
+archives on them, and their CrunchMania-packed files.
+`skids extract --data <adfs>` regenerates `assets/` from them.
+
+Because the binary and `assets/` carry the original game data, anyone you
+give either to also gets the game data.
 
 ## What works
 
@@ -54,11 +64,12 @@ cargo run --release
 The built executable (`target/release/skids`, or `skids.exe` on Windows)
 runs on its own from anywhere.
 
-`--data DIR` adds to or overrides the built-in data with more ADF images,
-LHA archives, or extracted `track/`, `vehicles/` and `palettes/` folders.
-Without `--data`, a folder like that in the current directory or next to
-the executable is picked up automatically. That means dropping disk 1 or
-real palette files next to the game just works.
+`--data DIR` adds to or overrides the built-in data. `DIR` can be an
+assets folder, which lets you try edits without rebuilding:
+`skids --data assets`. It can also be the original ADF images or LHA
+archives. Without `--data`, a folder like that in the current directory or
+next to the executable is picked up automatically. When a track or car
+exists both as an asset and on disk, the asset wins.
 
 | Action      | Player 1                              | Player 2 |
 |-------------|---------------------------------------|----------|
@@ -74,7 +85,7 @@ Options: `--scale 1|2|4` (window size), `--mute`.
 
 ```sh
 skids info    --data DIR                  # list tracks and vehicles found
-skids extract --data DIR --out pngs/      # dump every track (with gates) and car sheet
+skids extract --data ADFS [--out assets]  # convert original disks into editable assets
 skids bench   --data DIR --seconds 120    # race CPU cars on every track: laps and time on road
 skids trace   --data DIR --track 11 --out t.png   # plot CPU racing lines
 skids render  --data DIR --track 3 --out shot.png # headless screenshot
@@ -90,10 +101,10 @@ You need a stable Rust toolchain.
   `cargo build --release --no-default-features --features embed`.
 - **macOS / Windows:** `cargo build --release` works as is.
 
-The build embeds the data from the `*.adf` files next to `Cargo.toml`. To
-use images from somewhere else, set `SKIDS_EMBED_DIR=/path/to/adfs`. To
-build without embedding, so the game needs `--data` at run time, use
-`--no-default-features --features audio`.
+The build embeds `assets/`. To use a different folder, set
+`SKIDS_ASSETS_DIR=/path/to/assets`. To build without embedding, so the game
+needs `--data` at run time, use `--no-default-features --features audio`.
+The ADF images aren't needed to build.
 
 GitHub Actions builds all three platforms on every push
 (`.github/workflows/build.yml`).
@@ -101,7 +112,8 @@ GitHub Actions builds all three platforms on every push
 ## Layout
 
 ```
-build.rs       unpacks the ADFs and embeds the game files at build time
+assets/        the game data as editable PNG and text files
+build.rs       embeds assets/ into the executable
 src/formats/   ADF (OFS/FFS), LHA and CrunchMania readers
 src/data/      track, vehicle and palette decoding; locating the game files
 src/game/      physics, AI and race rules

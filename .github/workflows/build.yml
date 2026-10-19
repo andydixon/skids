@@ -31,7 +31,7 @@ jobs:
         run: cargo test --release
       - name: Build
         run: cargo build --release
-      - name: Check the binary runs without the disks
+      - name: Check the binary runs on its own
         shell: bash
         run: |
           mkdir -p "$RUNNER_TEMP/standalone"

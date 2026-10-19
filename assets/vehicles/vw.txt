@@ -1,0 +1,16 @@
+# Skids vehicle settings. Lines starting with # are comments.
+# The sprite sheet is vw.png: 32 headings across, 25 tilts down.
+name BEETLE
+# top speed on tarmac, world pixels per second
+top 185
+# acceleration and braking, world pixels per second squared
+accel 160
+brake 320
+# sideways grip (higher = less sliding)
+grip 4.6
+# steering rate, radians per second
+turn 3.6
+# weight in collisions
+mass 1
+# speed and grip multiplier off the road
+offroad 0.55

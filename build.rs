@@ -1,70 +1,51 @@
-//! Embeds the game data in the executable so it runs without the disks.
+//! Embeds the editable game assets in the executable so it runs on its own.
 //!
-//! The ADF images next to Cargo.toml (or in `SKIDS_EMBED_DIR`) are unpacked
-//! at build time and the files inside their LHA archives are packed into
-//! `$OUT_DIR/embedded.bin`, which `src/data/embedded.rs` includes. If no
-//! images are found the pack is empty and the game asks for `--data`.
-//! Disable with `--no-default-features --features audio`.
+//! Every file under `assets/` (or `SKIDS_ASSETS_DIR`) is packed into
+//! `$OUT_DIR/embedded.bin`, which `src/data/embedded.rs` includes. Edit the
+//! assets and rebuild to change the game. If the folder is missing the pack
+//! is empty and the game asks for `--data`. Disable embedding with
+//! `--no-default-features --features audio`.
 
-#[path = "src/formats/mod.rs"]
-#[allow(dead_code)]
-mod formats;
-
-use formats::{adf::Adf, lha};
 use std::env;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+fn collect(dir: &Path, rel: &str, out: &mut Vec<(String, Vec<u8>)>) {
+    println!("cargo:rerun-if-changed={}", dir.display());
+    let Ok(rd) = fs::read_dir(dir) else { return };
+    let mut entries: Vec<PathBuf> = rd.flatten().map(|e| e.path()).collect();
+    entries.sort();
+    for path in entries {
+        let name = path.file_name().unwrap().to_string_lossy().to_string();
+        if name.starts_with('.') {
+            continue;
+        }
+        let rel = format!("{rel}/{name}");
+        if path.is_dir() {
+            collect(&path, &rel, out);
+        } else {
+            println!("cargo:rerun-if-changed={}", path.display());
+            out.push((rel, fs::read(&path).unwrap()));
+        }
+    }
+}
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
-    println!("cargo:rerun-if-env-changed=SKIDS_EMBED_DIR");
+    println!("cargo:rerun-if-env-changed=SKIDS_ASSETS_DIR");
     let out = PathBuf::from(env::var("OUT_DIR").unwrap()).join("embedded.bin");
 
-    let mut files: Vec<(String, Vec<u8>)> = Vec::new();
+    let mut files = Vec::new();
     if env::var_os("CARGO_FEATURE_EMBED").is_some() {
-        let dir = env::var_os("SKIDS_EMBED_DIR")
+        let dir = env::var_os("SKIDS_ASSETS_DIR")
             .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap()));
-        println!("cargo:rerun-if-changed={}", dir.display());
-        let mut images: Vec<PathBuf> = fs::read_dir(&dir)
-            .map(|rd| rd.flatten().map(|e| e.path()).collect())
-            .unwrap_or_default();
-        images.retain(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("adf")));
-        images.sort();
-        for image in images {
-            println!("cargo:rerun-if-changed={}", image.display());
-            let name = image.display().to_string();
-            let disk = match fs::read(&image)
-                .map_err(|e| e.to_string())
-                .and_then(|d| Adf::open(d).map_err(|e| e.to_string()))
-                .and_then(|a| a.files().map_err(|e| e.to_string()))
-            {
-                Ok(f) => f,
-                Err(e) => {
-                    println!("cargo:warning=skipping {name}: {e}");
-                    continue;
-                }
-            };
-            for f in disk {
-                if !f.path.to_lowercase().ends_with(".lha") {
-                    files.push((f.path, f.data));
-                    continue;
-                }
-                match lha::parse(&f.data) {
-                    Ok(entries) => {
-                        for e in entries {
-                            if let Some(d) = e.data {
-                                files.push((e.path, d));
-                            }
-                        }
-                    }
-                    Err(e) => println!("cargo:warning=skipping {name}/{}: {e}", f.path),
-                }
-            }
-        }
+            .unwrap_or_else(|| {
+                PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap()).join("assets")
+            });
+        collect(&dir, "assets", &mut files);
         if files.is_empty() {
             println!(
-                "cargo:warning=no Super Skidmarks ADF images in {}; the game will need --data",
+                "cargo:warning=no assets in {}; the game will need --data (run `skids extract` to create them)",
                 dir.display()
             );
         }

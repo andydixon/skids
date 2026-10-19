@@ -81,7 +81,6 @@ enum Screen {
 
 pub struct App {
     pub data: GameData,
-    tracks: Vec<(usize, usize)>,
     pub settings: Settings,
     screen: Screen,
     pub frame: Frame,
@@ -96,7 +95,6 @@ pub struct App {
 
 impl App {
     pub fn new(data: GameData, audio: Audio) -> App {
-        let tracks = data.track_list();
         let cars = [
             data.vehicles.iter().position(|v| v.id == "f1").unwrap_or(0),
             data.vehicles
@@ -106,7 +104,6 @@ impl App {
         ];
         App {
             data,
-            tracks,
             settings: Settings {
                 players: 1,
                 track: 0,
@@ -150,8 +147,7 @@ impl App {
         laps: usize,
         seed: u32,
     ) -> Result<Race, String> {
-        let (f, s) = self.tracks[track_index];
-        let track = self.data.load_track(f, s)?;
+        let track = self.data.load_track(track_index)?;
         let nv = self.data.vehicles.len();
         let mut setup = Vec::new();
         for (p, &car) in cars.iter().enumerate().take(humans) {
@@ -182,8 +178,7 @@ impl App {
 
     fn thumb(&mut self, i: usize) -> Option<&Vec<u32>> {
         if !self.thumbs.contains_key(&i) {
-            let (f, s) = self.tracks[i];
-            let t = self.data.load_track(f, s).ok()?;
+            let t = self.data.load_track(i).ok()?;
             self.thumbs
                 .insert(i, render::downscale(&t.rgb(), THUMB_W, THUMB_H));
         }
@@ -275,7 +270,7 @@ impl App {
         if delta != 0 {
             match item {
                 Item::Players => s.players = if s.players == 1 { 2 } else { 1 },
-                Item::Track => s.track = wrap(s.track, self.tracks.len(), delta),
+                Item::Track => s.track = wrap(s.track, self.data.tracks.len(), delta),
                 Item::Laps => {
                     let i = LAP_CHOICES.iter().position(|&l| l == s.laps).unwrap_or(1);
                     s.laps = LAP_CHOICES[wrap(i, LAP_CHOICES.len(), delta)];
@@ -340,7 +335,7 @@ impl App {
             .as_ref()
             .is_none_or(|d| d.phase == Phase::Done || d.race_time() > 75.0);
         if finished {
-            self.demo_track = (self.demo_track + 7) % self.tracks.len();
+            self.demo_track = (self.demo_track + 7) % self.data.tracks.len();
             self.demo = self
                 .build_race(self.demo_track, 0, [0, 0], 4, 2, self.tick as u32 + 99)
                 .ok()
@@ -414,10 +409,7 @@ impl App {
             let label = match item {
                 Item::Start => "START RACE".to_string(),
                 Item::Players => format!("PLAYERS    < {} >", s.players),
-                Item::Track => format!("TRACK      < {} >", {
-                    let (fi, si) = self.tracks[s.track];
-                    self.data.track_files[fi].track_name(si)
-                }),
+                Item::Track => format!("TRACK      < {} >", self.data.tracks[s.track].name),
                 Item::Laps => format!("LAPS       < {} >", s.laps),
                 Item::Car1 => format!("P1 CAR     < {} >", self.data.vehicles[s.cars[0]].name),
                 Item::Car2 => format!("P2 CAR     < {} >", self.data.vehicles[s.cars[1]].name),

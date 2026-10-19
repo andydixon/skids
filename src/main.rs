@@ -23,7 +23,7 @@ skids - Super Skidmarks revival
 USAGE:
     skids [--data DIR] [--scale 1|2|4] [--mute]   play
     skids info    [--data DIR]                    list what was found in the data
-    skids extract [--data DIR] --out DIR          write PNGs of every track and car
+    skids extract [--data DIR] [--out DIR]        convert the data to editable assets (default ./assets)
     skids render  [--data DIR] --out FILE.png [--track N] [--seconds S] [--players 1|2] [--menu]
                                                   simulate a race (or the menu) and save a frame
     skids bench   [--data DIR] [--seconds S]      race computer cars on every track
@@ -165,11 +165,14 @@ fn info(data: &GameData, dir: Option<&Path>) {
         (n, None) => println!("Data: built in ({n} files)"),
     }
     println!("Tracks:");
-    for (f, s) in data.track_list() {
-        let tf = &data.track_files[f];
-        match tf.decode(s) {
-            Ok(t) => println!("  {:<10} {:>2} gates", t.name, t.gates.len()),
-            Err(e) => println!("  {:<10} ERROR {e}", tf.track_name(s)),
+    for (i, entry) in data.tracks.iter().enumerate() {
+        let from = match entry.source {
+            data::TrackSource::Asset { .. } => "asset",
+            data::TrackSource::Packed { .. } => "original data",
+        };
+        match data.load_track(i) {
+            Ok(t) => println!("  {:<10} {:>2} gates  ({from})", t.name, t.gates.len()),
+            Err(e) => println!("  {:<10} ERROR {e}", entry.name),
         }
     }
     println!("Vehicles:");
@@ -178,54 +181,46 @@ fn info(data: &GameData, dir: Option<&Path>) {
     }
 }
 
+/// Writes every track and vehicle as editable assets, then reads each one
+/// back to check the conversion is lossless.
 fn extract(data: &GameData, out: Option<&Path>) -> Result<(), String> {
-    use data::{track, vehicle};
-    let out = out.ok_or("extract needs --out DIR")?;
-    std::fs::create_dir_all(out).map_err(|e| e.to_string())?;
-    for (f, s) in data.track_list() {
-        let t = data.load_track(f, s)?;
-        let mut img = t.rgb();
-        // Overlay the lap gates so the track data can be checked by eye.
-        for g in &t.gates {
-            let steps = 64;
-            for i in 0..=steps {
-                let k = i as f32 / steps as f32;
-                let (x, y) =
-                    track::to_screen(g.a.0 + (g.b.0 - g.a.0) * k, g.a.1 + (g.b.1 - g.a.1) * k);
-                if (0.0..track::W as f32).contains(&x) && (0.0..track::H as f32).contains(&y) {
-                    img[y as usize * track::W + x as usize] = 0xff2020;
-                }
-            }
+    use data::{Track, Vehicle};
+    let out = out.unwrap_or(Path::new("assets"));
+    let write = |path: PathBuf, bytes: &[u8]| -> Result<(), String> {
+        std::fs::create_dir_all(path.parent().unwrap()).map_err(|e| e.to_string())?;
+        std::fs::write(&path, bytes).map_err(|e| format!("{}: {e}", path.display()))
+    };
+    for i in 0..data.tracks.len() {
+        let t = data.load_track(i)?;
+        let dir = out.join("tracks").join(t.name.to_lowercase());
+        let (png, txt) = (t.to_png()?, t.to_text());
+        let back = Track::from_assets(&t.name, &png, &txt)?;
+        let same = back.pixels == t.pixels
+            && back.palette == t.palette
+            && back.height == t.height
+            && back
+                .gates
+                .iter()
+                .zip(&t.gates)
+                .all(|(a, b)| a.a == b.a && a.b == b.b)
+            && back.gates.len() == t.gates.len();
+        if !same {
+            return Err(format!("{}: asset does not round-trip", t.name));
         }
-        let path = out.join(format!("{}.png", t.name.to_lowercase()));
-        render::save_png(&path, track::W, track::H, &img).map_err(|e| e.to_string())?;
-        println!("wrote {}", path.display());
+        write(dir.join("track.png"), &png)?;
+        write(dir.join("track.txt"), txt.as_bytes())?;
+        println!("wrote {}", dir.display());
     }
-    for (vi, v) in data.vehicles.iter().enumerate() {
-        // Sheet: 32 headings across, 25 tilt blocks down.
-        let (w, h) = (
-            vehicle::SPR_W * vehicle::HEADINGS,
-            vehicle::SPR_H * vehicle::TILTS,
-        );
-        let pal = data::palette::car_palette(vi);
-        let mut img = vec![0x203018u32; w * h];
-        for tilt in 0..vehicle::TILTS {
-            for hd in 0..vehicle::HEADINGS {
-                let fr = v.frame(tilt, hd);
-                for y in 0..vehicle::SPR_H {
-                    for x in 0..vehicle::SPR_W {
-                        let i = fr[y * vehicle::SPR_W + x];
-                        if i != 0 {
-                            img[(tilt * vehicle::SPR_H + y) * w + hd * vehicle::SPR_W + x] =
-                                pal[i as usize];
-                        }
-                    }
-                }
-            }
+    for v in &data.vehicles {
+        let (png, txt) = (v.sheet_png()?, v.settings_text());
+        let back = Vehicle::from_assets(&v.id, &png, Some(&txt))?;
+        if back.frames != v.frames || back.spec != v.spec || back.name != v.name {
+            return Err(format!("{}: asset does not round-trip", v.id));
         }
-        let path = out.join(format!("car-{}.png", v.id));
-        render::save_png(&path, w, h, &img).map_err(|e| e.to_string())?;
-        println!("wrote {}", path.display());
+        let dir = out.join("vehicles");
+        write(dir.join(format!("{}.png", v.id)), &png)?;
+        write(dir.join(format!("{}.txt", v.id)), txt.as_bytes())?;
+        println!("wrote {}", dir.join(&v.id).display());
     }
     Ok(())
 }
@@ -293,7 +288,7 @@ fn bench(data: GameData, args: &Args) -> Result<(), String> {
         "{:<10} {:>5} {:>8} {:>9} {:>8}",
         "TRACK", "GATES", "LAPS", "BEST LAP", "ON ROAD"
     );
-    for ti in 0..app.data.track_list().len() {
+    for ti in 0..app.data.tracks.len() {
         let mut race = app.build_race(ti, 0, [0, 0], 4, 99, ti as u32 + 1)?;
         let (mut road, mut samples) = (0usize, 0usize);
         for _ in 0..frames {

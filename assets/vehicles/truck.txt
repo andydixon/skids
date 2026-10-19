@@ -1,0 +1,16 @@
+# Skids vehicle settings. Lines starting with # are comments.
+# The sprite sheet is truck.png: 32 headings across, 25 tilts down.
+name TRUCK
+# top speed on tarmac, world pixels per second
+top 195
+# acceleration and braking, world pixels per second squared
+accel 140
+brake 320
+# sideways grip (higher = less sliding)
+grip 4.2
+# steering rate, radians per second
+turn 3
+# weight in collisions
+mass 1.8
+# speed and grip multiplier off the road
+offroad 0.75

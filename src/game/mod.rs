@@ -100,7 +100,7 @@ impl Race {
             let ((px, py), heading) = behind(&path, 18.0 + row * 30.0);
             let (rx, ry) = (-heading.sin(), heading.cos());
             let (x, y) = (px + rx * side * 12.0, py + ry * side * 12.0);
-            let car = Car::new(s.vehicle, &vehicles[s.vehicle].id, s.team, x, y, heading);
+            let car = Car::new(s.vehicle, vehicles[s.vehicle].spec, s.team, x, y, heading);
             let line = 0.3 + 0.4 * rand01(&mut rng);
             let pace = 0.86 + 0.12 * rand01(&mut rng);
             entrants.push(Entrant {

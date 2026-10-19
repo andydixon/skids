@@ -130,6 +130,9 @@ These almost certainly live on the missing disk 1:
 - Sound effects and music.
 - Any tracks or vehicles beyond the 24 and 8 above.
 
+The engine's own editable formats, which `skids extract` converts all of
+the above into, are described in [assets/README.md](../assets/README.md).
+
 If disk 1 turns up, put it next to the others and run `skids info`.
 Anything in a `track/` or `vehicles/` directory inside its archive is
 picked up automatically.
