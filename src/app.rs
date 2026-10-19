@@ -233,8 +233,22 @@ impl App {
     fn thumb(&mut self, i: usize) -> Option<&Vec<u32>> {
         if !self.thumbs.contains_key(&i) {
             let t = self.data.load_track(i).ok()?;
-            self.thumbs
-                .insert(i, render::downscale(&t.rgb(), THUMB_W, THUMB_H));
+            let img = match &t.thumbnail {
+                // The original thumbnail: Amiga hi-res pixels, so each row is
+                // shown twice to keep its shape.
+                Some(px) => {
+                    let pal: Vec<u32> = t.palette.iter().map(|c| c.to_u32()).collect();
+                    let mut out = vec![0x101010u32; THUMB_W * THUMB_H];
+                    for y in 0..THUMB_H {
+                        for x in 0..track::THUMB_W.min(THUMB_W) {
+                            out[y * THUMB_W + x] = pal[px[(y / 2) * track::THUMB_W + x] as usize];
+                        }
+                    }
+                    out
+                }
+                None => render::downscale(&t.rgb(), THUMB_W, THUMB_H),
+            };
+            self.thumbs.insert(i, img);
         }
         self.thumbs.get(&i)
     }

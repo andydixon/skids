@@ -47,7 +47,14 @@ Plain text; lines starting with `#` are comments.
 - **`start`, `flags`:** values from the original data that the game
   doesn't use.
 
-To add a track, make a new folder with both files. Tracks are listed in
+### `thumb.png` (optional)
+
+The track's 123 × 32 thumbnail from the original track-select screen, in
+the track's palette. It's drawn at double height in the menu, because the
+original's pixels are half-width. Without one, the menu shows a shrunken
+`track.png`.
+
+To add a track, make a new folder with `track.png` and `track.txt`. Tracks are listed in
 name order.
 
 ## Vehicles: `vehicles/<id>.png` and `<id>.txt`
@@ -125,7 +132,12 @@ files, the first in name order plays.
 ## Pictures: `gfx/*.png`
 
 Indexed PNGs. `skidtoon.png` is the title picture at the top of the menu,
-shown at half size. The others aren't used.
+shown at half size. The others aren't used:
+
+- `ball.png`: 64 frames of a spinning ball with the Acid logo, 16 frames
+  across, each 32 × 33. Its real colours aren't known, so it has a grey
+  palette.
+- `chat2.png`, `mouse.png`, `sign.png`: small odds and ends.
 
 ## Palettes: `palettes/*.pal` (optional)
 
