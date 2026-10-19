@@ -1,9 +1,12 @@
 //! Locates and decodes the original game data.
 //!
-//! Data can be supplied as the original ADF images, as the LHA archives taken
-//! off them, or as an already-extracted directory tree containing `track/` and
-//! `vehicles/`. Nothing from the original game is embedded in this program.
+//! The default build embeds the data from the ADF images it was built
+//! alongside (see `build.rs`), so no disks are needed at run time. Extra or
+//! replacement data can still be supplied as ADF images, the LHA archives
+//! from them, or an extracted tree with `track/`, `vehicles/` and `palettes/`.
+//! Files on disk override the built-in ones.
 
+pub mod embedded;
 pub mod palette;
 pub mod track;
 pub mod vehicle;
@@ -25,10 +28,16 @@ pub struct FileSet {
 }
 
 impl FileSet {
-    pub fn scan(root: &Path) -> FileSet {
+    pub fn embedded() -> FileSet {
         let mut fs_ = FileSet::default();
-        fs_.scan_dir(root, 0);
+        for (path, data) in embedded::files() {
+            fs_.add(&path, data.to_vec());
+        }
         fs_
+    }
+
+    pub fn scan(&mut self, root: &Path) {
+        self.scan_dir(root, 0);
     }
 
     fn scan_dir(&mut self, dir: &Path, depth: usize) {
@@ -116,8 +125,12 @@ pub struct GameData {
 }
 
 impl GameData {
-    pub fn load(root: &Path) -> Result<GameData, String> {
-        let files = FileSet::scan(root);
+    /// Loads the built-in data, overlaid with whatever is under `dir`.
+    pub fn load(dir: Option<&Path>) -> Result<GameData, String> {
+        let mut files = FileSet::embedded();
+        if let Some(dir) = dir {
+            files.scan(dir);
+        }
         let mut warnings = files.warnings.clone();
 
         let mut track_files = Vec::new();
@@ -145,9 +158,9 @@ impl GameData {
 
         if track_files.is_empty() || vehicles.is_empty() {
             return Err(format!(
-                "no usable game data under {} (found {} track files, {} vehicles).\n\
-                 Point --data at a folder containing the Super Skidmarks ADF images.{}",
-                root.display(),
+                "no usable game data (found {} track files, {} vehicles).\n\
+                 This build has no data built in: point --data at a folder containing the \
+                 Super Skidmarks ADF images, or rebuild with the images next to Cargo.toml.{}",
                 track_files.len(),
                 vehicles.len(),
                 if warnings.is_empty() {

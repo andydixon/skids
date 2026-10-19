@@ -3,10 +3,14 @@
 A cross-platform (Windows, macOS, Linux) engine written in Rust that plays
 *Super Skidmarks* (Acid Software, 1995) on the original Amiga data.
 
-It reads the game's ADF disk images directly: it unpacks the LHA archives
-on them, decrunches the CrunchMania-packed files, and decodes the planar
-track graphics and AGA sprite banks. No game assets are compiled into the
-program; you supply the disks.
+At build time it reads the game's ADF disk images from this repository:
+it unpacks the LHA archives on them and builds the game files into the
+executable. At run time it decrunches the CrunchMania-packed files and
+decodes the planar track graphics and AGA sprite banks. The finished
+program is a single self-contained file, with no disks needed to play.
+
+Because the binary carries the original game data, anyone you give a build
+to also gets the game data.
 
 ## What works
 
@@ -44,11 +48,17 @@ far.
 ## Running
 
 ```sh
-cargo run --release -- --data /path/to/adfs
+cargo run --release
 ```
 
-Without `--data`, the game looks in the current directory and then next to
-the executable, so running it from this repository's root just works.
+The built executable (`target/release/skids`, or `skids.exe` on Windows)
+runs on its own from anywhere.
+
+`--data DIR` adds to or overrides the built-in data with more ADF images,
+LHA archives, or extracted `track/`, `vehicles/` and `palettes/` folders.
+Without `--data`, a folder like that in the current directory or next to
+the executable is picked up automatically. That means dropping disk 1 or
+real palette files next to the game just works.
 
 | Action      | Player 1                              | Player 2 |
 |-------------|---------------------------------------|----------|
@@ -79,12 +89,18 @@ You need a stable Rust toolchain.
   without sound (no ALSA needed), use `cargo build --release --no-default-features`.
 - **macOS / Windows:** `cargo build --release` works as is.
 
+The build embeds the data from the `*.adf` files next to `Cargo.toml`. To
+use images from somewhere else, set `SKIDS_EMBED_DIR=/path/to/adfs`. To
+build without embedding, so the game needs `--data` at run time, use
+`--no-default-features --features audio`.
+
 GitHub Actions builds all three platforms on every push
 (`.github/workflows/build.yml`).
 
 ## Layout
 
 ```
+build.rs       unpacks the ADFs and embeds the game files at build time
 src/formats/   ADF (OFS/FFS), LHA and CrunchMania readers
 src/data/      track, vehicle and palette decoding; locating the game files
 src/game/      physics, AI and race rules
