@@ -1,110 +1,13 @@
 //! Vehicle handling.
 //!
-//! The retail executable is not available, so handling is a reconstruction:
-//! an arcade model with separate forward and lateral friction, which gives
+//! The retail executable is not available, so handling is a reconstruction
+//! (per-car values live in the vehicle assets): an arcade model with separate forward and lateral friction, which gives
 //! the long power-slides the series is known for. Physics runs on the
 //! isometric ground plane (see `data::track::to_screen`).
 
 use crate::data::track::{self, Track};
-use crate::data::vehicle;
+use crate::data::vehicle::{self, Spec};
 use std::f32::consts::{PI, TAU};
-
-#[derive(Clone, Copy, Debug)]
-pub struct Spec {
-    /// Top speed on tarmac, world pixels per second.
-    pub top: f32,
-    pub accel: f32,
-    pub brake: f32,
-    /// Lateral grip: how quickly sideways motion is killed (1/s).
-    pub grip: f32,
-    /// Steering rate at speed (rad/s).
-    pub turn: f32,
-    pub mass: f32,
-    /// Speed and grip multiplier off the road.
-    pub offroad: f32,
-}
-
-pub fn spec_for(id: &str) -> Spec {
-    let base = Spec {
-        top: 200.0,
-        accel: 170.0,
-        brake: 320.0,
-        grip: 5.0,
-        turn: 3.6,
-        mass: 1.0,
-        offroad: 0.55,
-    };
-    match id {
-        "f1" => Spec {
-            top: 240.0,
-            accel: 210.0,
-            grip: 6.5,
-            turn: 3.7,
-            mass: 0.9,
-            offroad: 0.45,
-            ..base
-        },
-        "porsche" => Spec {
-            top: 225.0,
-            accel: 190.0,
-            grip: 5.2,
-            turn: 3.6,
-            ..base
-        },
-        "mini" => Spec {
-            top: 190.0,
-            accel: 200.0,
-            grip: 5.8,
-            turn: 4.4,
-            mass: 0.8,
-            ..base
-        },
-        "vw" => Spec {
-            top: 185.0,
-            accel: 160.0,
-            grip: 4.6,
-            turn: 3.6,
-            mass: 1.0,
-            ..base
-        },
-        "midget" => Spec {
-            top: 205.0,
-            accel: 185.0,
-            grip: 4.0,
-            turn: 4.0,
-            mass: 0.85,
-            offroad: 0.6,
-            ..base
-        },
-        "truck" => Spec {
-            top: 195.0,
-            accel: 140.0,
-            grip: 4.2,
-            turn: 3.0,
-            mass: 1.8,
-            offroad: 0.75,
-            ..base
-        },
-        "police" => Spec {
-            top: 215.0,
-            accel: 180.0,
-            grip: 5.0,
-            turn: 3.5,
-            mass: 1.2,
-            ..base
-        },
-        "cow" => Spec {
-            top: 170.0,
-            accel: 150.0,
-            grip: 7.0,
-            turn: 4.6,
-            mass: 1.4,
-            offroad: 0.9,
-            ..base
-        },
-        _ => base,
-    }
-}
 
 pub const RADIUS: f32 = 11.0;
 const SLOPE_GRAVITY: f32 = 110.0;
@@ -143,10 +46,10 @@ pub struct Car {
 }
 
 impl Car {
-    pub fn new(vehicle: usize, id: &str, team: usize, x: f32, y: f32, heading: f32) -> Car {
+    pub fn new(vehicle: usize, spec: Spec, team: usize, x: f32, y: f32, heading: f32) -> Car {
         Car {
             vehicle,
-            spec: spec_for(id),
+            spec,
             team,
             x,
             y,

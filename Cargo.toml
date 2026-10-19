@@ -12,8 +12,8 @@ default = ["audio", "embed"]
 # Procedural engine/skid sound via cpal. Disable with --no-default-features
 # on Linux machines without the ALSA development headers.
 audio = ["dep:cpal"]
-# Build the game data from the ADF images next to Cargo.toml (or in
-# SKIDS_EMBED_DIR) into the executable, so it runs without the disks.
+# Build the editable game assets in assets/ (or SKIDS_ASSETS_DIR) into the
+# executable, so it runs on its own.
 embed = []
 
 [dependencies]

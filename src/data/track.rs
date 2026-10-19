@@ -18,6 +18,7 @@
 //! only lands on the road on 14 of the 24 tracks, so the grid is placed from
 //! the gates instead.
 
+use super::image;
 use super::palette::{self, Rgb};
 use super::unpack;
 use crate::formats::{be16, be32};
@@ -208,6 +209,139 @@ impl Track {
     pub fn on_road_world(&self, wx: f32, wy: f32) -> bool {
         let (sx, sy) = to_screen(wx, wy);
         on_screen(sx, sy, 0.0) && self.on_road(sx, sy)
+    }
+
+    /// Loads an editable asset: `track.png` (16-colour indexed; its palette
+    /// is the track palette) and `track.txt` (gates and height map).
+    pub fn from_assets(name: &str, png: &[u8], txt: &str) -> Result<Track, String> {
+        let img = image::read_indexed(png, &palette::TRACK_DEFAULT)?;
+        if (img.w, img.h) != (W, H) {
+            return Err(format!(
+                "track.png is {}x{}, expected {W}x{H}",
+                img.w, img.h
+            ));
+        }
+        if let Some(bad) = img.pixels.iter().find(|&&p| p > 15) {
+            return Err(format!(
+                "track.png uses palette index {bad}; tracks may only use 0-15"
+            ));
+        }
+        let mut pal = palette::TRACK_DEFAULT;
+        if let Some(own) = &img.palette {
+            for (dst, src) in pal.iter_mut().zip(own) {
+                *dst = *src;
+            }
+        }
+
+        let mut gates = Vec::new();
+        let mut start = (0.0, 0.0);
+        let mut flags = 0;
+        let mut height = Vec::with_capacity(HM_W * HM_H);
+        let mut in_height = false;
+        for (n, line) in txt.lines().enumerate() {
+            let err = |m: &str| format!("track.txt line {}: {m}", n + 1);
+            let line = line.split('#').next().unwrap_or("").trim();
+            if line.is_empty() {
+                continue;
+            }
+            let mut words = line.split_whitespace();
+            let first = words.next().unwrap_or("");
+            let nums = |w: std::str::SplitWhitespace| -> Result<Vec<f32>, String> {
+                w.map(|x| {
+                    x.parse::<f32>()
+                        .map_err(|_| err(&format!("`{x}` is not a number")))
+                })
+                .collect()
+            };
+            if in_height {
+                for x in line.split_whitespace() {
+                    height.push(
+                        x.parse::<u16>()
+                            .map_err(|_| err(&format!("bad height `{x}`")))?,
+                    );
+                }
+                continue;
+            }
+            match first {
+                "gate" => {
+                    let v = nums(words)?;
+                    if v.len() != 4 {
+                        return Err(err("gate needs x1 y1 x2 y2"));
+                    }
+                    gates.push(Gate {
+                        a: (v[0], v[1]),
+                        b: (v[2], v[3]),
+                    });
+                }
+                "start" => {
+                    let v = nums(words)?;
+                    if v.len() != 2 {
+                        return Err(err("start needs x y"));
+                    }
+                    start = (v[0], v[1]);
+                }
+                "flags" => {
+                    flags = words
+                        .next()
+                        .and_then(|x| x.parse().ok())
+                        .ok_or_else(|| err("bad flags"))?
+                }
+                "height" => in_height = true,
+                other => return Err(err(&format!("unknown entry `{other}`"))),
+            }
+        }
+        if gates.len() < 2 {
+            return Err("track.txt needs at least two gates".into());
+        }
+        if height.len() != HM_W * HM_H {
+            return Err(format!(
+                "track.txt height map has {} values, expected {}",
+                height.len(),
+                HM_W * HM_H
+            ));
+        }
+        Ok(Track {
+            name: name.to_string(),
+            pixels: img.pixels,
+            palette: pal,
+            height,
+            gates,
+            start,
+            flags,
+        })
+    }
+
+    pub fn to_png(&self) -> Result<Vec<u8>, String> {
+        image::write_indexed(W, H, &self.palette, false, &self.pixels)
+    }
+
+    pub fn to_text(&self) -> String {
+        let mut t = format!(
+            "# Skids track {}. Lines starting with # are comments.\n\
+             #\n\
+             # The picture is track.png: 1024x512, 16 colours. Its palette is the\n\
+             # track's palette. Colours 8-15 are road (full grip), 0-7 are scenery.\n\
+             #\n\
+             # gate x1 y1 x2 y2: lap gates in race order, in world units. Gate 0 is\n\
+             # the start/finish line; the grid forms up behind it. World to picture:\n\
+             #   picture x = wx - wy + 512, picture y = (wx + wy) * 31/64 - 252\n",
+            self.name
+        );
+        for g in &self.gates {
+            t.push_str(&format!("gate {} {} {} {}\n", g.a.0, g.a.1, g.b.0, g.b.1));
+        }
+        t.push_str(&format!(
+            "\n# As stored in the original data; not used by the game.\nstart {} {}\nflags {}\n\n\
+             # height: 64 rows of 64 values, ground height x 256. Each value covers\n\
+             # 16x8 pixels of the picture.\nheight\n",
+            self.start.0, self.start.1, self.flags
+        ));
+        for row in self.height.chunks(HM_W) {
+            let line: Vec<String> = row.iter().map(|v| v.to_string()).collect();
+            t.push_str(&line.join(" "));
+            t.push('\n');
+        }
+        t
     }
 
     pub fn rgb(&self) -> Vec<u32> {

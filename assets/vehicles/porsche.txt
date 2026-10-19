@@ -1,0 +1,16 @@
+# Skids vehicle settings. Lines starting with # are comments.
+# The sprite sheet is porsche.png: 32 headings across, 25 tilts down.
+name PORSCHE
+# top speed on tarmac, world pixels per second
+top 225
+# acceleration and braking, world pixels per second squared
+accel 190
+brake 320
+# sideways grip (higher = less sliding)
+grip 5.2
+# steering rate, radians per second
+turn 3.6
+# weight in collisions
+mass 1
+# speed and grip multiplier off the road
+offroad 0.55

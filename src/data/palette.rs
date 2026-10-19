@@ -6,8 +6,9 @@
 //! ordered dark-to-light, with 0-7 used for scenery and 8-15 for the driving
 //! surface, so two ramps give a faithful-looking result.
 //!
-//! Real palettes can be dropped in as text files (16 lines of `RRGGBB`,
-//! `#` comments allowed) next to the game data:
+//! Each track asset's PNG carries its own palette, so the usual way to
+//! recolour a track is to edit that. Palettes can also be dropped in as text
+//! files (16 lines of `RRGGBB`, `#` comments allowed), which win over both:
 //!   palettes/track1-3.pal   one track
 //!   palettes/track1.pal     all six tracks in TRACK1
 //!   palettes/default.pal    every track
@@ -100,11 +101,13 @@ pub fn parse(text: &str) -> Option<[Rgb; 16]> {
     (n == 16).then_some(out)
 }
 
-pub fn override_for(files: &FileSet, track_file: &str, section: usize) -> Option<[Rgb; 16]> {
-    let base = track_file.to_lowercase();
+/// A palette file for a track named like `TRACK1-3`, most specific first.
+pub fn override_for(files: &FileSet, track: &str) -> Option<[Rgb; 16]> {
+    let name = track.to_lowercase();
+    let group = name.split('-').next().unwrap_or(&name).to_string();
     [
-        format!("palettes/{base}-{}.pal", section + 1),
-        format!("palettes/{base}.pal"),
+        format!("palettes/{name}.pal"),
+        format!("palettes/{group}.pal"),
         "palettes/default.pal".into(),
     ]
     .iter()

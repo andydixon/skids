@@ -1,12 +1,15 @@
 //! Locates and decodes the original game data.
 //!
-//! The default build embeds the data from the ADF images it was built
-//! alongside (see `build.rs`), so no disks are needed at run time. Extra or
-//! replacement data can still be supplied as ADF images, the LHA archives
-//! from them, or an extracted tree with `track/`, `vehicles/` and `palettes/`.
-//! Files on disk override the built-in ones.
+//! The game's data lives in `assets/` as editable files: per-track PNG and
+//! text, per-vehicle sprite sheet and settings (see `track.rs` and
+//! `vehicle.rs`). The default build embeds that folder (see `build.rs`), so
+//! nothing is needed at run time. The original Amiga data is still read as
+//! ADF images, LHA archives, or `track/` and `vehicles/` files; `skids
+//! extract` converts it to assets. When both exist, assets win, so edits are
+//! never shadowed by the disks they came from.
 
 pub mod embedded;
+pub mod image;
 pub mod palette;
 pub mod track;
 pub mod vehicle;
@@ -97,14 +100,22 @@ impl FileSet {
     }
 }
 
-/// Reduces a path to `dir/name` if `dir` is one the game uses.
+/// Reduces a path to the key the game looks files up by: `dir/name` for
+/// the original data and palettes, `tracks/<name>/<file>` for track assets.
 fn logical_key(path: &str) -> Option<String> {
-    let parts: Vec<&str> = path.split(['/', '\\']).filter(|s| !s.is_empty()).collect();
-    if parts.len() < 2 {
+    let parts: Vec<String> = path
+        .split(['/', '\\'])
+        .filter(|s| !s.is_empty())
+        .map(str::to_lowercase)
+        .collect();
+    let n = parts.len();
+    if n >= 3 && parts[n - 3] == "tracks" {
+        return Some(format!("tracks/{}/{}", parts[n - 2], parts[n - 1]));
+    }
+    if n < 2 {
         return None;
     }
-    let dir = parts[parts.len() - 2].to_lowercase();
-    let name = parts[parts.len() - 1].to_lowercase();
+    let (dir, name) = (&parts[n - 2], &parts[n - 1]);
     matches!(dir.as_str(), "track" | "vehicles" | "palettes").then(|| format!("{dir}/{name}"))
 }
 
@@ -117,7 +128,20 @@ pub fn unpack(d: &[u8]) -> Result<Vec<u8>, crm::CrmError> {
     }
 }
 
+pub enum TrackSource {
+    /// `tracks/<name>/` asset files.
+    Asset { png: String, txt: String },
+    /// A section of an original `TRACKn` file.
+    Packed { file: usize, section: usize },
+}
+
+pub struct TrackEntry {
+    pub name: String,
+    pub source: TrackSource,
+}
+
 pub struct GameData {
+    pub tracks: Vec<TrackEntry>,
     pub track_files: Vec<TrackFile>,
     pub vehicles: Vec<Vehicle>,
     pub files: FileSet,
@@ -133,6 +157,26 @@ impl GameData {
         }
         let mut warnings = files.warnings.clone();
 
+        let mut tracks = Vec::new();
+        for key in files.files.keys() {
+            if let Some(rest) = key.strip_prefix("tracks/") {
+                if let Some(name) = rest.strip_suffix("/track.png") {
+                    let txt = format!("tracks/{name}/track.txt");
+                    if files.files.contains_key(&txt) {
+                        tracks.push(TrackEntry {
+                            name: name.to_uppercase(),
+                            source: TrackSource::Asset {
+                                png: key.clone(),
+                                txt,
+                            },
+                        });
+                    } else {
+                        warnings.push(format!("{key}: no track.txt next to it, skipped"));
+                    }
+                }
+            }
+        }
+
         let mut track_files = Vec::new();
         for (key, data) in &files.files {
             if let Some(name) = key.strip_prefix("track/") {
@@ -143,25 +187,59 @@ impl GameData {
             }
         }
         track_files.sort_by_key(|t| (t.number, t.name.clone()));
-
-        let mut vehicles = Vec::new();
-        for (key, data) in &files.files {
-            if let Some(name) = key.strip_prefix("vehicles/") {
-                match Vehicle::parse(name, data) {
-                    Ok(Some(v)) => vehicles.push(v),
-                    Ok(None) => warnings.push(format!("{key}: sprite data is blank, skipped")),
-                    Err(e) => warnings.push(format!("{key}: {e}")),
+        for (file, tf) in track_files.iter().enumerate() {
+            for section in 0..tf.sections.len() {
+                let name = tf.track_name(section);
+                if !tracks.iter().any(|t| t.name == name) {
+                    tracks.push(TrackEntry {
+                        name,
+                        source: TrackSource::Packed { file, section },
+                    });
                 }
             }
         }
-        vehicles.sort_by_key(|v| vehicle::display_order(&v.id));
+        tracks.sort_by_key(|t| natural_key(&t.name));
 
-        if track_files.is_empty() || vehicles.is_empty() {
+        let mut vehicles: Vec<Vehicle> = Vec::new();
+        for (key, data) in &files.files {
+            let Some(id) = key
+                .strip_prefix("vehicles/")
+                .and_then(|n| n.strip_suffix(".png"))
+            else {
+                continue;
+            };
+            let txt = files
+                .get(&format!("vehicles/{id}.txt"))
+                .map(String::from_utf8_lossy);
+            match Vehicle::from_assets(id, data, txt.as_deref()) {
+                Ok(v) => vehicles.push(v),
+                Err(e) => warnings.push(format!("{key}: {e}")),
+            }
+        }
+        for (key, data) in &files.files {
+            let Some(name) = key
+                .strip_prefix("vehicles/")
+                .filter(|n| n.ends_with(".aga"))
+            else {
+                continue;
+            };
+            if vehicles.iter().any(|v| format!("{}.aga", v.id) == name) {
+                continue;
+            }
+            match Vehicle::parse(name, data) {
+                Ok(Some(v)) => vehicles.push(v),
+                Ok(None) => warnings.push(format!("{key}: sprite data is blank, skipped")),
+                Err(e) => warnings.push(format!("{key}: {e}")),
+            }
+        }
+        vehicles.sort_by_key(|v| (vehicle::display_order(&v.id), v.id.clone()));
+
+        if tracks.is_empty() || vehicles.is_empty() {
             return Err(format!(
-                "no usable game data (found {} track files, {} vehicles).\n\
-                 This build has no data built in: point --data at a folder containing the \
-                 Super Skidmarks ADF images, or rebuild with the images next to Cargo.toml.{}",
-                track_files.len(),
+                "no usable game data (found {} tracks, {} vehicles).\n\
+                 This build has no data built in: point --data at the assets folder or \
+                 the Super Skidmarks ADF images, or rebuild with assets/ in place.{}",
+                tracks.len(),
                 vehicles.len(),
                 if warnings.is_empty() {
                     String::new()
@@ -171,6 +249,7 @@ impl GameData {
             ));
         }
         Ok(GameData {
+            tracks,
             track_files,
             vehicles,
             files,
@@ -178,23 +257,39 @@ impl GameData {
         })
     }
 
-    /// Flattened (file, section) list of every playable track.
-    pub fn track_list(&self) -> Vec<(usize, usize)> {
-        let mut v = Vec::new();
-        for (fi, tf) in self.track_files.iter().enumerate() {
-            for si in 0..tf.sections.len() {
-                v.push((fi, si));
+    pub fn load_track(&self, i: usize) -> Result<Track, String> {
+        let entry = &self.tracks[i];
+        let mut t = match &entry.source {
+            TrackSource::Asset { png, txt } => {
+                let txt = String::from_utf8_lossy(self.files.get(txt).unwrap_or_default());
+                Track::from_assets(&entry.name, self.files.get(png).unwrap_or_default(), &txt)
+                    .map_err(|e| format!("{}: {e}", entry.name))?
             }
-        }
-        v
-    }
-
-    pub fn load_track(&self, file: usize, section: usize) -> Result<Track, String> {
-        let tf = &self.track_files[file];
-        let mut t = tf.decode(section)?;
-        if let Some(p) = palette::override_for(&self.files, &tf.name, section) {
+            TrackSource::Packed { file, section } => self.track_files[*file].decode(*section)?,
+        };
+        if let Some(p) = palette::override_for(&self.files, &entry.name) {
             t.palette = p;
         }
         Ok(t)
     }
+}
+
+/// Sort key that orders TRACK2-10 after TRACK2-9.
+fn natural_key(name: &str) -> Vec<(String, u64)> {
+    let mut out = Vec::new();
+    let mut text = String::new();
+    let mut num = String::new();
+    for c in name.chars() {
+        if c.is_ascii_digit() {
+            num.push(c);
+        } else {
+            if !num.is_empty() {
+                out.push((std::mem::take(&mut text), num.parse().unwrap_or(0)));
+                num.clear();
+            }
+            text.push(c);
+        }
+    }
+    out.push((text, num.parse().unwrap_or(0)));
+    out
 }
