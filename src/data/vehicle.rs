@@ -6,6 +6,11 @@
 //! Its colours are only a preview; cars are recoloured per player. The text
 //! file holds the display name and handling.
 //!
+//! Settings (`vehicles/*.set`, disk 1): car name and driver name, each
+//! ending in a newline, then 544 bytes: 16 BE16 values (11 used; their
+//! meaning lives in the executable and is not decoded yet) and a 64x32
+//! two-colour-plane picture for the menu, plane 0 then plane 1.
+//!
 //! Original data (`vehicles/*.aga`):
 //! 409600 bytes once decrunched: 25 tilt blocks x 32 headings x 512 bytes.
 //! Each frame is a 64x32 AGA sprite with two bitplanes stored per line
@@ -135,6 +140,13 @@ pub fn default_spec(id: &str) -> Spec {
 pub struct Vehicle {
     pub id: String,
     pub name: String,
+    pub driver: String,
+    /// Towed behind cars rather than driven (the caravan).
+    pub trailer: bool,
+    /// The 16 values from the original `.set` file, kept for reference.
+    pub original: Vec<u16>,
+    /// 64x32 menu picture (indices 0-3), from the `.set` file.
+    pub menu_picture: Option<Vec<u8>>,
     pub spec: Spec,
     /// Palette indices 0..3, TILTS * HEADINGS frames of SPR_W x SPR_H.
     pub frames: Vec<u8>,
@@ -166,10 +178,56 @@ impl Vehicle {
         let id = file.trim_end_matches(".aga").to_lowercase();
         Ok(Some(Vehicle {
             name: display_name(&id),
+            driver: String::new(),
+            trailer: id == "caravan",
+            original: Vec::new(),
+            menu_picture: None,
             spec: default_spec(&id),
             id,
             frames,
         }))
+    }
+
+    /// Applies an original `.set` file.
+    pub fn apply_set(&mut self, d: &[u8]) -> Result<(), String> {
+        let nl = |from: usize| d[from..].iter().position(|&b| b == b'\n').map(|p| p + from);
+        let a = nl(0).ok_or("no name line")?;
+        let b = nl(a + 1).ok_or("no driver line")?;
+        let body = &d[b + 1..];
+        if body.len() < 32 + 512 {
+            return Err(format!("{} bytes of settings, expected 544", body.len()));
+        }
+        let name = crate::formats::latin1(&d[..a]).trim().to_uppercase();
+        if !matches!(self.id.as_str(), "f1" | "vw") && !name.is_empty() {
+            self.name = name;
+        }
+        self.driver = crate::formats::latin1(&d[a + 1..b]).trim().to_uppercase();
+        self.original = (0..16).map(|i| crate::formats::be16(body, i * 2)).collect();
+        let pic = &body[32..32 + 512];
+        let mut px = vec![0u8; SPR_W * SPR_H];
+        for (i, p) in px.iter_mut().enumerate() {
+            let (byte, mask) = (i / 8, 0x80 >> (i % 8));
+            *p = (pic[byte] & mask != 0) as u8 | (((pic[256 + byte] & mask) != 0) as u8) << 1;
+        }
+        self.menu_picture = Some(px);
+        Ok(())
+    }
+
+    pub fn menu_png(&self) -> Option<Result<Vec<u8>, String>> {
+        self.menu_picture
+            .as_ref()
+            .map(|px| image::write_indexed(SPR_W, SPR_H, &preview_palette(), true, px))
+    }
+
+    pub fn set_menu_png(&mut self, png: &[u8]) -> Result<(), String> {
+        let img = image::read_indexed(png, &preview_palette())?;
+        if (img.w, img.h) != (SPR_W, SPR_H) || img.pixels.iter().any(|&p| p > 3) {
+            return Err(format!(
+                "menu picture must be {SPR_W}x{SPR_H} using colours 0-3"
+            ));
+        }
+        self.menu_picture = Some(img.pixels);
+        Ok(())
     }
 
     /// Loads an editable asset: sprite sheet PNG plus optional settings text.
@@ -198,6 +256,10 @@ impl Vehicle {
         let mut v = Vehicle {
             id: id.to_string(),
             name: display_name(id),
+            driver: String::new(),
+            trailer: id == "caravan",
+            original: Vec::new(),
+            menu_picture: None,
             spec: default_spec(id),
             frames,
         };
@@ -227,6 +289,13 @@ impl Vehicle {
             "# Skids vehicle settings. Lines starting with # are comments.\n\
              # The sprite sheet is {id}.png: 32 headings across, 25 tilts down.\n\
              name {name}\n\
+             driver {driver}\n\
+             # yes = towed behind cars (Caravans option) instead of driven\n\
+             trailer {trailer}\n\
+             # The 16 values from the original .set file. Their meaning is not\n\
+             # decoded yet, so the game does not use them; the handling below is\n\
+             # a reconstruction.\n\
+             original {original}\n\
              # top speed on tarmac, world pixels per second\n\
              top {top}\n\
              # acceleration and braking, world pixels per second squared\n\
@@ -242,6 +311,14 @@ impl Vehicle {
              offroad {offroad}\n",
             id = self.id,
             name = self.name,
+            driver = self.driver,
+            trailer = if self.trailer { "yes" } else { "no" },
+            original = self
+                .original
+                .iter()
+                .map(|v| v.to_string())
+                .collect::<Vec<_>>()
+                .join(" "),
             top = s.top,
             accel = s.accel,
             brake = s.brake,
@@ -255,16 +332,32 @@ impl Vehicle {
     fn apply_settings(&mut self, txt: &str) -> Result<(), String> {
         for (n, line) in txt.lines().enumerate() {
             let line = line.split('#').next().unwrap_or("").trim();
-            let Some((key, val)) = line.split_once(char::is_whitespace) else {
-                if line.is_empty() {
+            if line.is_empty() {
+                continue;
+            }
+            let (key, val) = line.split_once(char::is_whitespace).unwrap_or((line, ""));
+            let val = val.trim();
+            match key {
+                "name" => {
+                    self.name = val.to_uppercase();
                     continue;
                 }
-                return Err(format!("line {}: expected `key value`", n + 1));
-            };
-            let val = val.trim();
-            if key == "name" {
-                self.name = val.to_uppercase();
-                continue;
+                "driver" => {
+                    self.driver = val.to_uppercase();
+                    continue;
+                }
+                "trailer" => {
+                    self.trailer = matches!(val, "yes" | "true" | "1");
+                    continue;
+                }
+                "original" => {
+                    self.original = val
+                        .split_whitespace()
+                        .filter_map(|x| x.parse().ok())
+                        .collect();
+                    continue;
+                }
+                _ => {}
             }
             let num: f32 = val
                 .parse()
@@ -338,24 +431,28 @@ mod tests {
 
     #[test]
     fn settings_round_trip() {
-        let mut v = Vehicle {
+        let blank = |frames| Vehicle {
             id: "f1".into(),
-            name: "X".into(),
+            name: String::new(),
+            driver: String::new(),
+            trailer: false,
+            original: Vec::new(),
+            menu_picture: None,
             spec: BASE_SPEC,
-            frames: vec![0; TILTS * HEADINGS * SPR_W * SPR_H],
+            frames,
         };
+        let mut v = blank(vec![0; TILTS * HEADINGS * SPR_W * SPR_H]);
+        v.driver = "SIMON".into();
+        v.original = vec![60, 71, 30];
         v.spec.grip = 6.25;
         v.name = "FORMULA 1".into();
         let txt = v.settings_text();
-        let mut w = Vehicle {
-            id: "f1".into(),
-            name: String::new(),
-            spec: BASE_SPEC,
-            frames: Vec::new(),
-        };
+        let mut w = blank(Vec::new());
         w.apply_settings(&txt).unwrap();
         assert_eq!(w.spec, v.spec);
         assert_eq!(w.name, "FORMULA 1");
+        assert_eq!(w.driver, "SIMON");
+        assert_eq!(w.original, v.original);
         assert!(w.apply_settings("grip fast").is_err());
     }
 
