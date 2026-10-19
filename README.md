@@ -3,8 +3,9 @@
 A cross-platform (Windows, macOS, Linux) engine written in Rust that plays
 *Super Skidmarks* (Acid Software, 1995) on the original Amiga data.
 
-The game's data was converted from the original ADF disk images into
-editable files in [`assets/`](assets/README.md):
+The game's data was converted from the original ADF disk images (disks 2–6
+of the six-disk set) into editable files in [`assets/`](assets/README.md).
+The images themselves are no longer kept in this repository.
 
 - **Each track:** a 16-colour PNG (the PNG's palette is the track's
   palette), plus a text file with the lap gates and height map.
