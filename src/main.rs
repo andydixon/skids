@@ -30,9 +30,11 @@ USAGE:
     skids trace   [--data DIR] --out FILE.png [--track N] [--seconds S]
                                                   draw the computer cars' paths on a track
 
-The data directory should hold the Super Skidmarks ADF images (or the LHA
-archives from them, or extracted track/ and vehicles/ folders). It defaults to
-the current directory, then the directory the executable is in.
+The game data is built into the executable, so no disks are needed. --data
+adds to or overrides it with ADF images, LHA archives, or extracted track/,
+vehicles/ and palettes/ folders (e.g. disk 1, or real palettes). Without
+--data, a folder like that in the current directory or next to the
+executable is picked up automatically.
 
 CONTROLS:
     Player 1: arrow keys (or W A S D in one-player games)
@@ -83,9 +85,12 @@ fn parse_args() -> Result<Args, String> {
     Ok(a)
 }
 
-fn find_data(explicit: Option<PathBuf>) -> PathBuf {
-    if let Some(p) = explicit {
-        return p;
+/// An explicit --data directory, or a nearby folder that looks like it holds
+/// game data (e.g. disk 1 dropped next to the executable). The built-in data
+/// is always loaded first, so finding nothing is fine.
+fn find_data(explicit: Option<PathBuf>) -> Option<PathBuf> {
+    if explicit.is_some() {
+        return explicit;
     }
     let looks_right = |d: &Path| {
         std::fs::read_dir(d).is_ok_and(|rd| {
@@ -103,10 +108,7 @@ fn find_data(explicit: Option<PathBuf>) -> PathBuf {
         candidates.push(dir);
     }
     candidates.push(PathBuf::from("data"));
-    candidates
-        .into_iter()
-        .find(|d| looks_right(d))
-        .unwrap_or_else(|| PathBuf::from("."))
+    candidates.into_iter().find(|d| looks_right(d))
 }
 
 fn main() -> ExitCode {
@@ -125,7 +127,7 @@ fn main() -> ExitCode {
         }
     };
     let root = find_data(args.data.clone());
-    let data = match GameData::load(&root) {
+    let data = match GameData::load(root.as_deref()) {
         Ok(d) => d,
         Err(e) => {
             eprintln!("{e}");
@@ -137,7 +139,7 @@ fn main() -> ExitCode {
     }
     let result = match args.cmd.as_str() {
         "info" => {
-            info(&data);
+            info(&data, root.as_deref());
             Ok(())
         }
         "extract" => extract(&data, args.out.as_deref()),
@@ -155,7 +157,13 @@ fn main() -> ExitCode {
     }
 }
 
-fn info(data: &GameData) {
+fn info(data: &GameData, dir: Option<&Path>) {
+    let built_in = data::embedded::files().len();
+    match (built_in, dir) {
+        (0, Some(d)) => println!("Data: {}", d.display()),
+        (n, Some(d)) => println!("Data: built in ({n} files), plus {}", d.display()),
+        (n, None) => println!("Data: built in ({n} files)"),
+    }
     println!("Tracks:");
     for (f, s) in data.track_list() {
         let tf = &data.track_files[f];
