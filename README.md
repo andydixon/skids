@@ -86,7 +86,8 @@ You need a stable Rust toolchain.
 
 - **Linux:** install the ALSA and X11 development packages, e.g.
   `sudo apt install libasound2-dev libx11-dev libxkbcommon-dev`. To build
-  without sound (no ALSA needed), use `cargo build --release --no-default-features`.
+  without sound (no ALSA needed), use
+  `cargo build --release --no-default-features --features embed`.
 - **macOS / Windows:** `cargo build --release` works as is.
 
 The build embeds the data from the `*.adf` files next to `Cargo.toml`. To
