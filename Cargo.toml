@@ -1,0 +1,29 @@
+[package]
+name = "skids"
+version = "0.1.0"
+edition = "2021"
+description = "Cross-platform revival of Super Skidmarks (Acid Software, 1995) that runs on the original Amiga game data"
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/andydixon/skids"
+
+[features]
+default = ["audio"]
+# Procedural engine/skid sound via cpal. Disable with --no-default-features
+# on Linux machines without the ALSA development headers.
+audio = ["dep:cpal"]
+
+[dependencies]
+minifb = "0.28"
+png = "0.18"
+cpal = { version = "0.15", optional = true }
+
+[profile.dev]
+# The renderer is a software rasteriser; unoptimised builds are too slow to play.
+opt-level = 2
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true
