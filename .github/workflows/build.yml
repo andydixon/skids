@@ -1,0 +1,45 @@
+name: build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact: skids-linux-x86_64
+            bin: skids
+          - os: windows-latest
+            artifact: skids-windows-x86_64
+            bin: skids.exe
+          - os: macos-latest
+            artifact: skids-macos-arm64
+            bin: skids
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Linux dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libx11-dev libxkbcommon-dev
+      - name: Test
+        run: cargo test --release
+      - name: Build
+        run: cargo build --release
+      - name: Check against the game data
+        shell: bash
+        run: |
+          ./target/release/${{ matrix.bin }} info --data .
+          ./target/release/${{ matrix.bin }} bench --data . --seconds 60
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: |
+            target/release/${{ matrix.bin }}
+            README.md
+            docs/FORMATS.md
