@@ -37,6 +37,9 @@ gate 402 504 402 378
 gate 342.53125 501.71875 264 374.5
 gate 316.5625 513.03125 192.25 387
 
+# Name of the set of tracks this one belongs to, shown in the menu.
+set Sounf Of Speed
+
 # As stored in the original data; not used by the game.
 start 213 275
 flags 1

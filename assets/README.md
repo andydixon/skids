@@ -42,6 +42,8 @@ Plain text; lines starting with `#` are comments.
 - **`height`:** 64 rows of 64 numbers giving ground height × 256. Each
   number covers a 16 × 8 pixel cell of the picture. Slopes push cars
   downhill and tilt the car sprites.
+- **`set`:** the name of the set of tracks this one belongs to, shown under
+  the menu thumbnail.
 - **`start`, `flags`:** values from the original data that the game
   doesn't use.
 
@@ -68,12 +70,21 @@ A 2048 × 800 sprite sheet: 32 headings across by 25 tilts down, each cell
 - **Tilts:** row = roll × 5 + pitch (each 0–4), so row 12 is the car on
   flat ground.
 
+### `<id>-menu.png` (optional)
+
+The car's 64 × 32 picture from the original select screen, in the same
+four colours as the sprite sheet.
+
 ### `<id>.txt`
 
-The display name and handling:
+The display name, driver and handling:
 
 | Setting   | Meaning |
 |-----------|---------|
+| `name`    | name shown in the menu |
+| `driver`  | driver's name, shown next to it |
+| `trailer` | `yes` for something towed behind cars (the caravan) rather than driven |
+| `original`| the 16 values from the original `.set` file, kept for reference; the game doesn't use them yet |
 | `top`     | top speed on tarmac |
 | `accel`   | acceleration |
 | `brake`   | braking |
@@ -82,7 +93,39 @@ The display name and handling:
 | `mass`    | weight in collisions |
 | `offroad` | speed and grip multiplier on scenery |
 
-To add a car, add a new `<id>.png` / `<id>.txt` pair.
+The handling values are a reconstruction, so tune them freely. To add a
+car, add a new `<id>.png` / `<id>.txt` pair.
+
+## Sounds: `sounds/*.wav`
+
+8-bit mono WAV files at the original Amiga sample rates. A loop point,
+stored in the WAV's `smpl` chunk, makes a sound repeat from there; most
+sample editors keep it. The game uses these names:
+
+| Sound | Use |
+|-------|-----|
+| `motor3` | engine, pitched up and down with revs (falls back to `motor`, then `engine`) |
+| `screech2` | tyres sliding (falls back to `screech3`, then `screech`) |
+| `crash1`, `crash2`, `crash3` | collisions, picked at random |
+| `backfire` | lifting off at high revs |
+| `horn` | Right Shift (player 1) or Left Shift (player 2) |
+| `beep`, `beep2` | countdown, then lights out |
+
+Missing sounds fall back to synthesised ones. Any other WAV files are kept
+but not used.
+
+## Music: `music/*.med`
+
+The tune, an OctaMED module. Edit it in a tracker that reads MED files,
+such as OpenMPT. The game's player supports plain sample instruments (no
+synth sounds) and the commands listed in `docs/FORMATS.md`. Preview it
+with `skids music --data assets --out tune.wav`. If there are several
+files, the first in name order plays.
+
+## Pictures: `gfx/*.png`
+
+Indexed PNGs. `skidtoon.png` is the title picture at the top of the menu,
+shown at half size. The others aren't used.
 
 ## Palettes: `palettes/*.pal` (optional)
 

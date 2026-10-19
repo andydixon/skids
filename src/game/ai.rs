@@ -17,8 +17,6 @@ pub struct Ai {
     pub line: f32,
     /// Fraction of the car's top speed this driver uses.
     pub pace: f32,
-    /// Index of the path segment the car is on (gate i-1 to gate i).
-    seg: Option<usize>,
     stuck_for: f32,
     blocked_for: f32,
     reversing: f32,
@@ -29,7 +27,6 @@ impl Ai {
         Ai {
             line,
             pace,
-            seg: None,
             stuck_for: 0.0,
             blocked_for: 0.0,
             reversing: 0.0,
@@ -46,16 +43,12 @@ impl Ai {
     /// Point `dist` along the driving line from the car's projection onto it.
     fn pursue(&mut self, car: &Car, gates: &[Gate], next_gate: usize, dist: f32) -> (f32, f32) {
         let n = gates.len();
-        // Search a few segments ahead of the last known one; never jump back,
-        // so figure-of-eight crossings don't confuse it. Resync to the lap
-        // counter if we drift too far from it.
-        let mut seg = self.seg.unwrap_or(next_gate);
-        let ahead = (next_gate + n - seg) % n;
-        if ahead > 3 && ahead < n - 1 {
-            seg = next_gate;
-        }
+        // Only the stretch into the gate the lap counter needs next, or the
+        // one after it (crossing counts with one gate skipped), so a car
+        // knocked backwards turns round for the gate it missed.
+        let seg = next_gate;
         let mut best = (f32::MAX, seg, 0.0f32);
-        for k in 0..4 {
+        for k in 0..2 {
             let i = (seg + k) % n;
             let a = self.point(&gates[(i + n - 1) % n]);
             let b = self.point(&gates[i]);
@@ -68,7 +61,6 @@ impl Ai {
             }
         }
         let (_, mut i, t) = best;
-        self.seg = Some(i);
 
         let mut a = self.point(&gates[(i + n - 1) % n]);
         let mut b = self.point(&gates[i]);

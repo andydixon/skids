@@ -1,6 +1,13 @@
 # Skids vehicle settings. Lines starting with # are comments.
 # The sprite sheet is porsche.png: 32 headings across, 25 tilts down.
 name PORSCHE
+driver IMAGINE
+# yes = towed behind cars (Caravans option) instead of driven
+trailer no
+# The 16 values from the original .set file. Their meaning is not
+# decoded yet, so the game does not use them; the handling below is
+# a reconstruction.
+original 56 34 22 6 2 15 21 12 49 14 44 0 0 0 0 0
 # top speed on tarmac, world pixels per second
 top 225
 # acceleration and braking, world pixels per second squared

@@ -1,9 +1,11 @@
 //! LHA/LZH archive reader (header levels 0, 1 and 2).
 //!
-//! The game disks only use the `-lh0-` (stored) method because every file is
-//! already CrunchMania-packed, so compressed methods are reported rather than
-//! decoded.
+//! Supports the stored (`-lh0-`, `-lz4-`) and LZSS/Huffman (`-lh5-`, `-lh6-`,
+//! `-lh7-`) methods. Every decoded file is checked against the header CRC.
+//! Entries in other methods, or that fail to decode, carry the reason in
+//! `data` instead of their contents.
 
+use super::lzh;
 use super::{latin1, le16, le32};
 use std::fmt;
 
@@ -28,8 +30,8 @@ pub struct LhaEntry {
     /// Path inside the archive, `/`-separated.
     pub path: String,
     pub method: String,
-    /// File contents for stored entries, `None` for methods we do not decode.
-    pub data: Option<Vec<u8>>,
+    /// File contents, or why they could not be read.
+    pub data: Result<Vec<u8>, String>,
 }
 
 pub fn parse(d: &[u8]) -> Result<Vec<LhaEntry>, LhaError> {
@@ -45,7 +47,9 @@ pub fn parse(d: &[u8]) -> Result<Vec<LhaEntry>, LhaError> {
         }
         let method = latin1(method);
         let mut packed = le32(d, p + 7) as usize;
+        let original = le32(d, p + 11) as usize;
         let level = d[p + 20];
+        let mut crc = None;
 
         let mut name = String::new();
         let mut dir = String::new();
@@ -59,6 +63,9 @@ pub fn parse(d: &[u8]) -> Result<Vec<LhaEntry>, LhaError> {
                     return Err(LhaError::Truncated(p));
                 }
                 name = latin1(&d[p + 22..p + 22 + name_len]);
+                if p + 24 + name_len <= d.len() {
+                    crc = Some(le16(d, p + 22 + name_len));
+                }
                 let mut q = p + header_len;
                 if level == 1 {
                     // Extended headers follow the base header and are counted
@@ -81,6 +88,7 @@ pub fn parse(d: &[u8]) -> Result<Vec<LhaEntry>, LhaError> {
                 if p + header_len > d.len() || header_len < 26 {
                     return Err(LhaError::Truncated(p));
                 }
+                crc = Some(le16(d, p + 21));
                 let mut q = p + 26;
                 let mut next = le16(d, p + 24) as usize;
                 while next != 0 {
@@ -101,10 +109,18 @@ pub fn parse(d: &[u8]) -> Result<Vec<LhaEntry>, LhaError> {
             return Err(LhaError::Truncated(data_start));
         }
         let path = join_path(&dir, &name);
-        let data = match method.as_str() {
-            "-lh0-" | "-lz4-" => Some(d[data_start..data_end].to_vec()),
-            _ => None,
+        let body = &d[data_start..data_end];
+        let decoded = match method.as_str() {
+            "-lh0-" | "-lz4-" => Ok(body.to_vec()),
+            "-lh5-" => lzh::decode(body, original, 13).map_err(|e| e.to_string()),
+            "-lh6-" => lzh::decode(body, original, 15).map_err(|e| e.to_string()),
+            "-lh7-" => lzh::decode(body, original, 16).map_err(|e| e.to_string()),
+            other => Err(format!("unsupported method {other}")),
         };
+        let data = decoded.and_then(|v| match crc {
+            Some(c) if lzh::crc16(&v) != c => Err("CRC mismatch".to_string()),
+            _ => Ok(v),
+        });
         if method != "-lhd-" {
             out.push(LhaEntry { path, method, data });
         }
@@ -149,7 +165,7 @@ mod tests {
         h[20] = 0;
         h[21] = name.len() as u8;
         h.extend_from_slice(name.as_bytes());
-        h.extend_from_slice(&[0, 0]); // CRC, unchecked
+        h.extend_from_slice(&lzh::crc16(body).to_le_bytes());
         h[0] = (h.len() - 2) as u8;
         h.extend_from_slice(body);
         h
@@ -163,7 +179,7 @@ mod tests {
         let e = parse(&arc).unwrap();
         assert_eq!(e.len(), 2);
         assert_eq!(e[0].path, "dir/a.bin");
-        assert_eq!(e[0].data.as_deref(), Some(&b"hello"[..]));
-        assert_eq!(e[1].data.as_deref(), Some(&b"world!"[..]));
+        assert_eq!(e[0].data.as_deref(), Ok(&b"hello"[..]));
+        assert_eq!(e[1].data.as_deref(), Ok(&b"world!"[..]));
     }
 }

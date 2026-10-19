@@ -1,10 +1,8 @@
 //! Colour palettes.
 //!
-//! The track and vehicle files carry no colour tables; the retail game sets
-//! them from its main executable, which lives on disk 1. Until that disk is
-//! available we use a reconstructed palette. Indices on the retail tracks are
-//! ordered dark-to-light, with 0-7 used for scenery and 8-15 for the driving
-//! surface, so two ramps give a faithful-looking result.
+//! Each original track file carries the 16-colour palette its six tracks
+//! share (see `track.rs`). `TRACK_DEFAULT` is only a fallback for track
+//! pictures that arrive without one: indices 0-7 scenery, 8-15 road.
 //!
 //! Each track asset's PNG carries its own palette, so the usual way to
 //! recolour a track is to edit that. Palettes can also be dropped in as text

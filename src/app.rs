@@ -1,6 +1,6 @@
 //! Front end: menu, race screens and results.
 
-use crate::audio::Audio;
+use crate::audio::{Audio, Sfx};
 use crate::data::{palette, track, vehicle, GameData};
 use crate::game::car::Controls;
 use crate::game::{Driver, EntrantSetup, Phase, Race};
@@ -45,12 +45,22 @@ impl Input {
     }
 }
 
+#[derive(Clone, Copy, PartialEq)]
+pub enum Music {
+    Menus,
+    Always,
+    Off,
+}
+
 pub struct Settings {
     pub players: usize,
     pub track: usize,
     pub laps: usize,
     pub cars: [usize; 2],
     pub opponents: usize,
+    /// Every car tows a caravan.
+    pub caravans: bool,
+    pub music: Music,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -62,6 +72,8 @@ enum Item {
     Car1,
     Car2,
     Opponents,
+    Caravans,
+    Music,
     Quit,
 }
 
@@ -73,14 +85,29 @@ enum Screen {
         race: Box<Race>,
         cams: [(f32, f32); 2],
         paused: bool,
+        sounds: RaceSounds,
     },
     Results {
         race: Box<Race>,
     },
 }
 
+/// What the race screen remembers between frames to decide when to play
+/// one-shot sounds.
+#[derive(Default)]
+struct RaceSounds {
+    countdown: Option<u32>,
+    go_played: bool,
+    bumps: Vec<f32>,
+    throttle: [f32; 2],
+}
+
 pub struct App {
     pub data: GameData,
+    /// Indices of vehicles that can be driven (not trailers).
+    cars: Vec<usize>,
+    /// The title picture at half size, if the data has one.
+    title: Option<(usize, usize, Vec<u32>)>,
     pub settings: Settings,
     screen: Screen,
     pub frame: Frame,
@@ -95,21 +122,35 @@ pub struct App {
 
 impl App {
     pub fn new(data: GameData, audio: Audio) -> App {
-        let cars = [
-            data.vehicles.iter().position(|v| v.id == "f1").unwrap_or(0),
+        let drivable: Vec<usize> = (0..data.vehicles.len())
+            .filter(|&i| !data.vehicles[i].trailer)
+            .collect();
+        let pick = |id: &str| {
             data.vehicles
                 .iter()
-                .position(|v| v.id == "mini")
-                .unwrap_or(0),
-        ];
+                .position(|v| v.id == id)
+                .unwrap_or(drivable[0])
+        };
+        let cars = [pick("f1"), pick("mini")];
+        let title = data.pictures.get("skidtoon").map(half_size);
+        let music = if audio.has_music() {
+            Music::Menus
+        } else {
+            Music::Off
+        };
+        audio.set_music(music != Music::Off);
         App {
             data,
+            cars: drivable,
+            title,
             settings: Settings {
                 players: 1,
                 track: 0,
                 laps: 3,
                 cars,
                 opponents: 3,
+                caravans: false,
+                music,
             },
             screen: Screen::Menu { cursor: 0 },
             frame: Frame::new(),
@@ -134,7 +175,14 @@ impl App {
         if self.settings.players == 2 {
             v.push(Item::Car2);
         }
-        v.extend([Item::Opponents, Item::Quit]);
+        v.push(Item::Opponents);
+        if self.data.vehicles.iter().any(|v| v.trailer) {
+            v.push(Item::Caravans);
+        }
+        if self.audio.has_music() {
+            v.push(Item::Music);
+        }
+        v.push(Item::Quit);
         v
     }
 
@@ -148,7 +196,11 @@ impl App {
         seed: u32,
     ) -> Result<Race, String> {
         let track = self.data.load_track(track_index)?;
-        let nv = self.data.vehicles.len();
+        let trailer = if self.settings.caravans {
+            self.data.vehicles.iter().position(|v| v.trailer)
+        } else {
+            None
+        };
         let mut setup = Vec::new();
         for (p, &car) in cars.iter().enumerate().take(humans) {
             setup.push(EntrantSetup {
@@ -156,6 +208,7 @@ impl App {
                 driver: Driver::Human(p),
                 team: p,
                 name: format!("PLAYER {}", p + 1),
+                trailer,
             });
         }
         let mut rng = seed.wrapping_mul(2654435761) | 1;
@@ -164,10 +217,11 @@ impl App {
             rng ^= rng >> 17;
             rng ^= rng << 5;
             setup.push(EntrantSetup {
-                vehicle: rng as usize % nv,
+                vehicle: self.cars[rng as usize % self.cars.len()],
                 driver: Driver::Cpu,
                 team: humans + i,
                 name: CPU_NAMES[(i + seed as usize) % CPU_NAMES.len()].to_string(),
+                trailer,
             });
         }
         // Humans start at the back, as is tradition.
@@ -189,9 +243,15 @@ impl App {
         self.tick += 1;
         match &mut self.screen {
             Screen::Menu { .. } => self.update_menu(input),
-            Screen::Race { race, paused, .. } => {
+            Screen::Race {
+                race,
+                paused,
+                sounds,
+                cams,
+            } => {
                 if input.hit(Key::Escape) {
                     self.audio.silence();
+                    self.audio.set_music(self.settings.music != Music::Off);
                     self.screen = Screen::Menu { cursor: 0 };
                     return;
                 }
@@ -216,22 +276,10 @@ impl App {
                 };
                 let p2 = input.controls(Key::W, Key::S, Key::A, Key::D);
                 race.step(&[p1, p2]);
-                for (i, e) in race
-                    .entrants
-                    .iter()
-                    .filter(|e| matches!(e.driver, Driver::Human(_)))
-                    .enumerate()
-                {
-                    let c = &e.car;
-                    let skid = if c.on_road {
-                        ((c.slip - 50.0) / 100.0).clamp(0.0, 1.0)
-                    } else {
-                        0.0
-                    };
-                    self.audio.set_voice(i, true, c.rpm, skid, c.bump);
-                }
+                race_sounds(&self.audio, race, sounds, cams, input, self.tick);
                 if race.phase == Phase::Done {
                     self.audio.silence();
+                    self.audio.set_music(self.settings.music != Music::Off);
                     let Screen::Race { race, .. } =
                         std::mem::replace(&mut self.screen, Screen::Menu { cursor: 0 })
                     else {
@@ -265,7 +313,6 @@ impl App {
         let delta = input.hit(Key::Right) as i32 - input.hit(Key::Left) as i32;
         let item = items[cur];
         let s = &mut self.settings;
-        let nv = self.data.vehicles.len();
         let wrap = |v: usize, n: usize, d: i32| (v as i32 + d).rem_euclid(n as i32) as usize;
         if delta != 0 {
             match item {
@@ -275,9 +322,23 @@ impl App {
                     let i = LAP_CHOICES.iter().position(|&l| l == s.laps).unwrap_or(1);
                     s.laps = LAP_CHOICES[wrap(i, LAP_CHOICES.len(), delta)];
                 }
-                Item::Car1 => s.cars[0] = wrap(s.cars[0], nv, delta),
-                Item::Car2 => s.cars[1] = wrap(s.cars[1], nv, delta),
+                Item::Car1 | Item::Car2 => {
+                    let slot = (item == Item::Car2) as usize;
+                    let at = self
+                        .cars
+                        .iter()
+                        .position(|&c| c == s.cars[slot])
+                        .unwrap_or(0);
+                    s.cars[slot] = self.cars[wrap(at, self.cars.len(), delta)];
+                }
                 Item::Opponents => s.opponents = wrap(s.opponents, 8 - s.players + 1, delta),
+                Item::Caravans => s.caravans = !s.caravans,
+                Item::Music => {
+                    const ORDER: [Music; 3] = [Music::Menus, Music::Always, Music::Off];
+                    let at = ORDER.iter().position(|&m| m == s.music).unwrap_or(0);
+                    s.music = ORDER[wrap(at, 3, delta)];
+                    self.audio.set_music(s.music != Music::Off);
+                }
                 _ => {}
             }
             s.opponents = s.opponents.min(8 - s.players);
@@ -294,6 +355,8 @@ impl App {
                 | Item::Car2
                 | Item::Laps
                 | Item::Players
+                | Item::Caravans
+                | Item::Music
                 | Item::Opponents => {
                     let s = &self.settings;
                     match self.build_race(
@@ -310,7 +373,9 @@ impl App {
                                 race: Box::new(r),
                                 cams,
                                 paused: false,
+                                sounds: RaceSounds::default(),
                             };
+                            self.audio.set_music(self.settings.music == Music::Always);
                             if let Screen::Race { race, cams, .. } = &mut screen {
                                 for (i, cam) in cams.iter_mut().enumerate() {
                                     if let Some(e) =
@@ -400,8 +465,17 @@ impl App {
             f.clear(0x101820);
         }
 
-        f.text_centered(160, 10, "SKIDS", YELLOW, 4);
-        f.text_centered(160, 42, "A SUPER SKIDMARKS REVIVAL", WHITE, 1);
+        let top = match &self.title {
+            Some((w, h, px)) => {
+                f.image(px, *w, *h, (SCREEN_W as i32 - *w as i32) / 2, 2);
+                *h as i32 + 6
+            }
+            None => {
+                f.text_centered(160, 10, "SKIDS", YELLOW, 4);
+                f.text_centered(160, 42, "A SUPER SKIDMARKS REVIVAL", WHITE, 1);
+                60
+            }
+        };
 
         let cursor = cursor.min(items.len() - 1);
         let s = &self.settings;
@@ -414,9 +488,20 @@ impl App {
                 Item::Car1 => format!("P1 CAR     < {} >", self.data.vehicles[s.cars[0]].name),
                 Item::Car2 => format!("P2 CAR     < {} >", self.data.vehicles[s.cars[1]].name),
                 Item::Opponents => format!("OPPONENTS  < {} >", s.opponents),
+                Item::Caravans => {
+                    format!("CARAVANS   < {} >", if s.caravans { "ON" } else { "OFF" })
+                }
+                Item::Music => format!(
+                    "MUSIC      < {} >",
+                    match s.music {
+                        Music::Menus => "MENUS",
+                        Music::Always => "ALWAYS",
+                        Music::Off => "OFF",
+                    }
+                ),
                 Item::Quit => "QUIT".to_string(),
             };
-            let y = 64 + i as i32 * 14;
+            let y = top + i as i32 * 12;
             let colour = if i == cursor { YELLOW } else { WHITE };
             if i == cursor {
                 f.text_shadow(8, y, ">", RED, 1);
@@ -430,10 +515,22 @@ impl App {
         if let Some(th) = self.thumb(track).cloned() {
             let f = &mut self.frame;
             f.frame_rect(
-                Rect::new(px - 2, 62, THUMB_W as i32 + 4, THUMB_H as i32 + 4),
+                Rect::new(px - 2, top - 2, THUMB_W as i32 + 4, THUMB_H as i32 + 4),
                 WHITE,
             );
-            f.image(&th, THUMB_W, THUMB_H, px, 64);
+            f.image(&th, THUMB_W, THUMB_H, px, top);
+            let set = self
+                .data
+                .load_track(track)
+                .map(|t| t.set_name)
+                .unwrap_or_default();
+            f.text_centered(
+                px + THUMB_W as i32 / 2,
+                top + THUMB_H as i32 + 4,
+                &truncate(&set.to_uppercase(), 21),
+                GREY,
+                1,
+            );
         }
 
         // Car preview, slowly turning.
@@ -443,31 +540,153 @@ impl App {
         let v = &self.data.vehicles[s.cars[which]];
         let heading = (self.tick / 4) as usize % vehicle::HEADINGS;
         let pal = palette::car_palette(which);
-        let (cx, cy) = (px + THUMB_W as i32 / 2 - 32, 150);
-        f.fill(Rect::new(px - 2, 140, THUMB_W as i32 + 4, 52), 0x203018);
-        f.frame_rect(Rect::new(px - 2, 140, THUMB_W as i32 + 4, 52), WHITE);
+        let by = top + THUMB_H as i32 + 16;
+        let (cx, cy) = (px + THUMB_W as i32 / 2 - 32, by + 3);
+        f.fill(Rect::new(px - 2, by, THUMB_W as i32 + 4, 48), 0x203018);
+        f.frame_rect(Rect::new(px - 2, by, THUMB_W as i32 + 4, 48), WHITE);
         let clip = Rect::new(0, 0, SCREEN_W as i32, SCREEN_H as i32);
         f.sprite_shadow(v.frame(vehicle::LEVEL, heading), cx + 3, cy + 3, clip);
         f.sprite(v.frame(vehicle::LEVEL, heading), &pal, cx, cy, clip);
-        f.text_centered(px + THUMB_W as i32 / 2, 182, &v.name, WHITE, 1);
+        let label = if v.driver.is_empty() {
+            v.name.clone()
+        } else {
+            format!("{} - {}", v.name, v.driver)
+        };
+        f.text_centered(
+            px + THUMB_W as i32 / 2,
+            by + 38,
+            &truncate(&label, 21),
+            WHITE,
+            1,
+        );
 
         let help = if self.settings.players == 2 {
             "P1: ARROWS   P2: W A S D"
         } else {
             "DRIVE: ARROWS OR W A S D"
         };
-        f.text_centered(160, 222, help, GREY, 1);
+        f.text_centered(160, 230, help, GREY, 1);
         f.text_centered(
             160,
-            236,
+            242,
             "UP/DOWN: CHOOSE  LEFT/RIGHT: CHANGE  ENTER: GO",
             GREY,
             1,
         );
         if let Some(st) = &self.status {
-            f.text_centered(160, 200, st, RED, 1);
+            f.text_centered(160, 218, st, RED, 1);
         }
     }
+}
+
+/// Plays the sounds a race frame calls for: engines and tyres for each
+/// player, countdown beeps, horns, backfires, and crashes near a camera.
+fn race_sounds(
+    audio: &Audio,
+    race: &Race,
+    s: &mut RaceSounds,
+    cams: &[(f32, f32); 2],
+    input: &Input,
+    tick: u64,
+) {
+    let humans: Vec<usize> = (0..race.entrants.len())
+        .filter(|&i| matches!(race.entrants[i].driver, Driver::Human(_)))
+        .collect();
+    for (slot, &i) in humans.iter().enumerate().take(2) {
+        let c = &race.entrants[i].car;
+        let skid = if c.on_road {
+            ((c.slip - 50.0) / 100.0).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        audio.set_voice(slot, true, c.rpm, skid);
+        let pan = if humans.len() == 2 {
+            [0.3, 0.7][slot]
+        } else {
+            0.5
+        };
+        let throttle = c.controls.throttle;
+        // Lifting off at high revs pops now and then.
+        if s.throttle[slot] > 0.0
+            && throttle == 0.0
+            && c.rpm > 0.7
+            && (tick.wrapping_mul(2654435761)).is_multiple_of(4)
+        {
+            audio.play(Sfx::Backfire, pan);
+        }
+        s.throttle[slot] = throttle;
+    }
+    // Player one's horn is Right Shift, player two's Left Shift.
+    let horn_keys = [Key::RightShift, Key::LeftShift];
+    for (slot, key) in horn_keys.iter().enumerate().take(humans.len().max(1)) {
+        if input.hit(*key) {
+            audio.play(
+                Sfx::Horn,
+                if humans.len() == 2 {
+                    [0.3, 0.7][slot]
+                } else {
+                    0.5
+                },
+            );
+        }
+    }
+
+    match race.countdown() {
+        Some(n) if s.countdown != Some(n) => {
+            s.countdown = Some(n);
+            audio.play(Sfx::Beep, 0.5);
+        }
+        None if !s.go_played && race.phase != Phase::Countdown => {
+            s.go_played = true;
+            audio.play(Sfx::Go, 0.5);
+        }
+        _ => {}
+    }
+
+    s.bumps.resize(race.entrants.len(), 0.0);
+    for (i, e) in race.entrants.iter().enumerate() {
+        let b = e.car.bump;
+        if b > 0.3 && b > s.bumps[i] + 0.2 {
+            let (sx, sy) = e.car.screen_pos();
+            let near = cams
+                .iter()
+                .take(humans.len().max(1))
+                .map(|c| (c.0 - sx).hypot(c.1 - sy))
+                .fold(f32::MAX, f32::min);
+            if near < 220.0 {
+                let pan = (0.5 + (sx - cams[0].0) / 400.0).clamp(0.1, 0.9);
+                audio.play(Sfx::Crash(b), pan);
+            }
+        }
+        s.bumps[i] = b;
+    }
+}
+
+/// Halves a picture with a 2x2 box filter, for the menu header.
+fn half_size(p: &crate::formats::iff::Picture) -> (usize, usize, Vec<u32>) {
+    let (w, h) = (p.w / 2, p.h / 2);
+    let rgb = |x: usize, y: usize| {
+        let c = p
+            .palette
+            .get(p.pixels[y * p.w + x] as usize)
+            .copied()
+            .unwrap_or((0, 0, 0));
+        (c.0 as u32, c.1 as u32, c.2 as u32)
+    };
+    let mut out = Vec::with_capacity(w * h);
+    for y in 0..h {
+        for x in 0..w {
+            let px = [
+                rgb(2 * x, 2 * y),
+                rgb(2 * x + 1, 2 * y),
+                rgb(2 * x, 2 * y + 1),
+                rgb(2 * x + 1, 2 * y + 1),
+            ];
+            let avg = |f: fn(&(u32, u32, u32)) -> u32| px.iter().map(f).sum::<u32>() / 4;
+            out.push((avg(|c| c.0) << 16) | (avg(|c| c.1) << 8) | avg(|c| c.2));
+        }
+    }
+    (w, h, out)
 }
 
 pub fn draw_race(
@@ -536,24 +755,37 @@ pub fn draw_world(
         }
     }
 
-    let mut order: Vec<usize> = (0..race.entrants.len()).collect();
-    order.sort_by(|&a, &b| {
-        race.entrants[a]
-            .car
-            .screen_pos()
-            .1
-            .total_cmp(&race.entrants[b].car.screen_pos().1)
-    });
-    for i in order {
+    // Cars and caravans, back to front.
+    let mut order: Vec<(f32, usize, bool)> = Vec::new();
+    for (i, e) in race.entrants.iter().enumerate() {
+        order.push((e.car.screen_pos().1, i, false));
+        if let Some(t) = e.trailer {
+            order.push((track::to_screen(t.x, t.y).1, i, true));
+        }
+    }
+    order.sort_by(|a, b| a.0.total_cmp(&b.0));
+    for (_, i, is_trailer) in order {
         let e = &race.entrants[i];
         let c = &e.car;
+        let pal = palette::car_palette(c.team);
+        if is_trailer {
+            let t = e.trailer.unwrap();
+            let (sx, sy) = track::to_screen(t.x, t.y);
+            let x = view.x + sx as i32 - cx - (vehicle::SPR_W as i32 / 2);
+            let y = view.y + sy as i32 - cy - (vehicle::SPR_H as i32 / 2);
+            let pix =
+                data.vehicles[t.vehicle].frame(vehicle::LEVEL, vehicle::heading_frame(t.heading));
+            f.sprite_shadow(pix, x + 3, y + 2, view);
+            f.sprite(pix, &pal, x, y, view);
+            continue;
+        }
         let v = &data.vehicles[c.vehicle];
         let (sx, sy) = c.screen_pos();
         let x = view.x + sx as i32 - cx - (vehicle::SPR_W as i32 / 2);
         let y = view.y + sy as i32 - cy - (vehicle::SPR_H as i32 / 2);
         let pix = v.frame(c.tilt, vehicle::heading_frame(c.heading));
         f.sprite_shadow(pix, x + 3, y + 2, view);
-        f.sprite(pix, &palette::car_palette(c.team), x, y, view);
+        f.sprite(pix, &pal, x, y, view);
         if let Driver::Human(p) = e.driver {
             let tag = format!("P{}", p + 1);
             let tx = x + 32 - 5;
