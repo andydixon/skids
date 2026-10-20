@@ -1,11 +1,14 @@
 # Skids track TRACK1-3. Lines starting with # are comments.
 #
 # The picture is track.png: 1024x512, 16 colours. Its palette is the
-# track's palette. Colours 8-15 are road (full grip), 0-7 are scenery.
+# track's palette. Colours 8-15 are road, 0-7 are scenery (dusty).
 #
 # gate x1 y1 x2 y2: lap gates in race order, in world units. Gate 0 is
-# the start/finish line; the grid forms up behind it. World to picture:
-#   picture x = wx - wy + 512, picture y = (wx + wy) * 31/64 - 252
+# the start/finish line; the grid forms up behind it. The gates' ends
+# also shape the walls: each edge of the road is a smooth curve
+# through the matching ends of the gates. World to picture, for a
+# point at height z (pixels):
+#   picture x = wx - wy + 512, picture y = (wx + wy) / 2 - 156 - z
 gate 754 375 827.25 340
 gate 686.25 304.25 692.875 209.25
 gate 614.375 275.875 608.6875 199.875
@@ -30,6 +33,7 @@ gate 376.5 563.5 316.5 653.5
 gate 487.75 549.25 491.5 648.5
 gate 708 556 686.5 649.5
 gate 766.5 529.5 861 616.5
+gate 776 448.5 882.625 465.75
 
 # Name of the set of tracks this one belongs to, shown in the menu.
 set Racing In The Name Of
@@ -38,8 +42,8 @@ set Racing In The Name Of
 start 608 305
 flags 0
 
-# height: 64 rows of 64 values, ground height x 256. Each value covers
-# 16x8 pixels of the picture.
+# height: 64 rows (world y) of 64 values (world x), ground height in
+# pixels x 64. Each value covers 16 x 16 world units.
 height
 6400 6400 6400 6400 6400 6400 6400 6400 6400 6400 6400 6400 6400 6400 6400 6400 6400 6400 6400 6400 6400 6400 6400 6400 6400 6400 6400 6400 6400 6400 6400 6400 6400 6400 6400 6400 6400 6400 6400 6400 6400 6400 6400 6400 6400 6400 6400 6400 6400 6400 6400 6400 6400 6400 6400 6400 6400 6400 6400 6400 6400 6400 6400 6400
 6400 6400 6400 6400 6400 6400 6400 6400 6400 6400 6400 6400 6400 6400 6400 6400 6400 6400 6400 6400 6400 6400 6400 6400 6400 6400 6400 6400 6400 6400 6400 6400 6400 6400 6400 6400 6400 6400 6400 6400 6400 6400 6400 6400 6400 6400 6400 6400 6400 6400 6400 6400 6400 6400 6400 6400 6400 6400 6400 6400 6400 6400 6400 6400

@@ -28,32 +28,44 @@ give either to also gets the game data.
 ## What works
 
 - All 24 tracks across the four track files, in their original palettes.
-  Each has its isometric height map and lap gates.
+  Each has its isometric height map and lap gates, and walls along the
+  road edges, curved the way the original curves them.
 - All 9 cars (Mini, Beetle, Porsche, Formula 1, Midget, Truck, Police,
   Cow, Camaro) with their drivers' names, each with 32 headings and 25
   body-tilt frames for hills.
+- The original handling: each car drives with the values from its `.set`
+  file, decoded from the executable, with separate profiles for human and
+  computer drivers. The menu's **Handling** option also offers the
+  original's six presets (Classic, Grunty, Zippy, Rippy, Slippery and Pedal
+  Car).
 - The caravan: turn on **Caravans** in the menu and every car tows one.
 - The original sound effects, and the original tune played by a built-in
   OctaMED player. The menu has a **Music** option: menus, always, or off.
 - The original title picture.
 - 1 or 2 players (split screen) plus up to 7 computer drivers.
-- Power-slide handling, slopes, car-to-car bumping, and skid marks burnt
-  into the track.
+- Power-slides, jumps, hills that slow you going up and speed you up coming
+  down, car-to-car bumping, and skid marks burnt into the track.
 - Lap and position tracking, lap times, and a results table.
 - Engine note pitched with revs, tyre screech, crashes, backfires, a horn
   and start beeps, all from the original samples.
 
-## What's reconstructed
+## What's from the original, and what isn't
 
-The executable is on disk 1, but its game logic, a compiled Blitz Basic 2
-program, hasn't been decoded. So the **handling, computer drivers and race
-rules** are new code written to feel like the original, not a translation
-of it.
+The game logic is a compiled Blitz Basic 2 program on disk 1. These parts
+were decoded from its machine code and work the same way here:
+- the car physics: engine, grip, steering, gravity and jumps, and hills
+- the meaning of every `.set` value, and the handling presets
+- the walls along the road edges
+- how the world is projected onto the screen, including height
 
-Each car's original settings file has eleven handling numbers whose
-meaning lives in that code. They're kept in the car's settings asset for
-when it is decoded. [docs/FORMATS.md](docs/FORMATS.md) covers everything
-reverse engineered so far.
+The rest is new code written to feel like the original:
+- how computer drivers choose their line (they steer and drive as the
+  original's do)
+- car-to-car collisions
+- lap counting and the rescue of stuck cars
+
+[docs/FORMATS.md](docs/FORMATS.md) covers everything reverse engineered so
+far.
 
 ## Running
 
@@ -88,7 +100,7 @@ Options: `--scale 1|2|4` (window size), `--mute`.
 skids info    --data DIR                  # list tracks and vehicles found
 skids extract --data ADFS [--out assets]  # convert original disks into editable assets
 skids bench   --data DIR --seconds 120    # race CPU cars on every track: laps and time on road
-skids trace   --data DIR --track 11 --out t.png   # plot CPU racing lines
+skids trace   --data DIR --track 11 --out t.png   # plot walls, gates and CPU racing lines
 skids render  --data DIR --track 3 --out shot.png # headless screenshot
 skids music   --out tune.wav --seconds 60     # render the tune to WAV
 skids unpack  disk.adf --out files/           # extract a disk or LHA archive as-is
