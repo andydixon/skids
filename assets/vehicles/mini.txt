@@ -9,9 +9,8 @@ trailer no
 # original game does. Counting from 1:
 #   1 2 6    computer drivers: drag, grip, power
 #   9 10 11  human drivers: drag, grip, power
-#   3 steering, 5 gravity, 7 tow hitch distance; the rest are unused.
+#   3 steering, 5 gravity, 7 and 8 half the car's length and width
+#   (for collisions; the tow hitch is at the back). The rest are unused.
 # Top speed = power * drag / (64 - drag) / 32 world units per frame,
 # 50 frames a second (drag below 64). Higher grip, less sliding.
 handling 56 24 30 12 3 24 20 12 46 10 100 0 0 0 0 0
-# weight when cars collide (not from the original data)
-mass 0.8

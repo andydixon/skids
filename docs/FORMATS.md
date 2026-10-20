@@ -194,12 +194,13 @@ with these shifts. Word `k` is the `k`th `u16`, counting from 0:
 | 3 | `$c0` | −w / 64 | stored but never read |
 | 4 | `$106` | w / 8  | gravity, pixels per frame² |
 | 5 | `$b8` | w / 512 | power (computer drivers) |
-| 6 | (towing) | w / 32 | tow hitch distance behind the car, in game units |
+| 6 | (collisions, towing) | w / 32 | half the car's length, in game units; the tow hitch is at the back |
+| 7 | (collisions) | w / 32 | half the car's width |
 | 8 | `$bc` | w / 64  | drag (human drivers) |
 | 9 | `$e2` | w / 512 | grip (human drivers) |
 | 10 | `$b8` | w / 512 | power (human drivers) |
 
-Words 7 and 11–15 aren't read. [Game logic](#game-logic) shows how drag,
+Words 11–15 aren't read. [Game logic](#game-logic) shows how drag,
 grip and power work together. In short, top speed is
 `power × drag / (1 − drag)` game units per frame. For the Camaro that is
 271 of this port's units a second for human drivers and 186 for computer
@@ -226,6 +227,7 @@ For a preset `(a, t, g)`:
 - p = t/16 × (1/drag − 1), and power = p/8
 - grip = g/256 / p / drag / 8
 - steering = byte 6 / 32, gravity = 0.5
+- The car's size (words 6 and 7) still comes from its own settings.
 
 So top speed is simply t/128 game units per frame.
 
@@ -300,6 +302,7 @@ Each car is a 266-byte (`$10a`) record:
 | `$a6` | engine speed |
 | `$aa` | forward speed |
 | `$b8`, `$bc`, `$e2`, `$e6`, `$106` | handling (above) |
+| `$86` | active (negative) |
 | `$d2`, `$d6` | links to the car towing this one, and the one it tows |
 | `$ea` | zone (half-gate) progress |
 
@@ -341,14 +344,77 @@ fits in one field. Then `$247ac` integrates every car.
 A warping car (state 1) instead flies straight at a point on the track:
 its velocity is the distance to it / 16.
 
+Note that the heading vector points to the car's *rear*: pushing the
+joystick forward gives a throttle of −1. This document flips that round
+and talks about forward throttle as positive.
+
 ### Computer drivers
 
 Computer cars use words 0, 1 and 5 for handling rather than 8, 9 and 10.
-They steer with the sign of the cross product between their heading and
-the direction to a target point, as if holding a joystick hard over. The
-targets come from a table of points built along the road. The driver
-picks one side of the road or the other depending on which way the road
-bends, and the throttle comes from fixed values.
+
+**The path.** At set-up (`$1ea82` onwards) the game walks the middle of
+the road, the average of the two edge curves. It drops a node every 2
+game units, adjusting each step by bisection until the gap squared is
+between 3.8 and 4.2. Each 36-byte node (array `-$7e68(a5)`) holds:
+- the centre point
+- the unit vector across the road
+- a point 1 unit in from each wall
+- its position along the spline
+
+A second table maps each zone to its first node.
+
+**Each frame:**
+1. The driver predicts its position four frames ahead, `pos + 4 ×
+   velocity`. It finds the first node that point hasn't passed: only
+   nodes within −2 to +8 zones of the car count, and a node is passed
+   once the point is beyond the line across the road there.
+2. Its default target is the centre of the node 4 on, at full throttle.
+3. If the predicted point is beyond the line joining one side's inset
+   points at that node and the one before, it's running wide. It aims
+   at the other side's point 2 nodes on instead, at 0.7 throttle. The
+   constants are Motorola fast floating point values set at `$14886`:
+   1.0 (negated), and that times `$b333`.
+4. Steering is the sign of the cross product of its heading with the
+   direction from where it is now to the target, as if holding a
+   joystick hard over.
+
+### Collisions between cars
+
+Routine `$1b324` tests only the human players' cars. Each is tested
+against every other active car and caravan except the caravan it tows.
+So computer cars pass through each other and through caravans.
+
+For a pair (A = the player's car, B = the other):
+1. **Proximity** (`$260ba`): skip unless |dx| ≤ 2 and |dy| ≤ 2 game units
+   and |dz| < 17 pixels. So cars on a bridge don't hit cars under it.
+2. **Strength:** k = 64 × |velocity A − velocity B|² + 20, in game units
+   per frame.
+3. **Points:** six points on A, rotated with A, come from a table built
+   for every heading out of words 6 and 7: the four corners, then one on
+   each side at 0.58 of the half-width. Each is tested against B's box,
+   which is the same for every vehicle: ±0.375 across and ±0.75 along
+   B's heading (`$25f3c`).
+4. **Push:** for each point inside the box, B's velocity gains the
+   point's offset from A's centre × k / 256 and A's loses the same. The
+   side points use 2.5 k.
+5. **Spin:** each corner inside the box also turns A by k / 16 (64ths of
+   a turn) on its turn rate, and twice that on its heading. The sign is
+   the one that swings that corner away from B.
+6. **Sound:** any hit plays the crash sound for both cars.
+
+### Towing
+
+A caravan is a car record linked from its car (`$d6`), and it's dragged
+in the per-car loop at `$1cf64`:
+- **Hitch:** at the back of the car, half its length (word 6) behind the
+  centre. The game uses the car's position after this frame's move.
+- **Swing:** the caravan turns to point at the hitch, and is placed 0.656
+  game units behind it, by setting its velocity to the gap.
+- **Jack-knife:** if the caravan ends up more than 90° from the car, both
+  are set to 45° either side of the angle halfway between them. So the
+  caravan steers the car too.
+- **Warps:** when the car warps, its caravan is parked off the map until
+  it lands.
 
 ## Executables
 
@@ -360,10 +426,7 @@ bends, and the throttle comes from fixed values.
 ## Gaps
 
 - **Game logic still to decode:**
-  - car-to-car collisions
-  - exactly how computer drivers pick target points and throttle
-  - the warp rules
-  - the towing physics, beyond the hitch distance
+  - the warp rules (when a car is warped back to the track)
   - the race rules and scoring
 - **Unknown data:**
   - the six per-track words after each track file's palette
