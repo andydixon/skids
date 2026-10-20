@@ -3,11 +3,23 @@
 //! The engine reads the original Amiga data (ADF images, the LHA archives on
 //! them, or extracted files) at run time; no game assets are bundled.
 
+/// Like `println!`, but a closed pipe (e.g. `skids info | head`) ends the
+/// program quietly instead of panicking.
+macro_rules! out {
+    ($($arg:tt)*) => {{
+        use std::io::Write;
+        if writeln!(std::io::stdout(), $($arg)*).is_err() {
+            std::process::exit(0);
+        }
+    }};
+}
+
 mod app;
 mod audio;
 mod data;
 mod formats;
 mod game;
+mod music;
 mod render;
 
 use app::{App, Input};
@@ -24,15 +36,19 @@ USAGE:
     skids [--data DIR] [--scale 1|2|4] [--mute]   play
     skids info    [--data DIR]                    list what was found in the data
     skids extract [--data DIR] [--out DIR]        convert the data to editable assets (default ./assets)
-    skids render  [--data DIR] --out FILE.png [--track N] [--seconds S] [--players 1|2] [--menu]
+    skids unpack  FILE.adf|FILE.lha --out DIR     extract every file from a disk image or archive
+    skids music   [--data DIR] --out FILE.wav [--seconds S]
+                                                  render the tune to a WAV file
+    skids render  [--data DIR] --out FILE.png [--track N] [--seconds S] [--players 1|2] [--menu] [--caravans]
                                                   simulate a race (or the menu) and save a frame
-    skids bench   [--data DIR] [--seconds S]      race computer cars on every track
+    skids bench   [--data DIR] [--seconds S] [--caravans]
+                                                  race computer cars on every track
     skids trace   [--data DIR] --out FILE.png [--track N] [--seconds S]
                                                   draw the computer cars' paths on a track
 
 The game data is built into the executable, so no disks are needed. --data
 adds to or overrides it with ADF images, LHA archives, or extracted track/,
-vehicles/ and palettes/ folders (e.g. disk 1, or real palettes). Without
+vehicles/ and palettes/ folders, or an assets folder of edits. Without
 --data, a folder like that in the current directory or next to the
 executable is picked up automatically.
 
@@ -51,6 +67,7 @@ struct Args {
     seconds: f32,
     players: usize,
     menu: bool,
+    caravans: bool,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -64,6 +81,7 @@ fn parse_args() -> Result<Args, String> {
         seconds: 12.0,
         players: 1,
         menu: false,
+        caravans: false,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -78,7 +96,12 @@ fn parse_args() -> Result<Args, String> {
             "--players" => a.players = val("--players")?.parse().map_err(|_| "bad --players")?,
             "--mute" => a.mute = true,
             "--menu" => a.menu = true,
-            "info" | "extract" | "render" | "bench" | "trace" | "play" => a.cmd = arg,
+            "--caravans" => a.caravans = true,
+            "info" | "extract" | "render" | "bench" | "trace" | "music" | "play" => a.cmd = arg,
+            "unpack" => {
+                a.cmd = arg;
+                a.data = Some(val("unpack")?.into());
+            }
             other => return Err(format!("unknown argument {other}")),
         }
     }
@@ -86,7 +109,7 @@ fn parse_args() -> Result<Args, String> {
 }
 
 /// An explicit --data directory, or a nearby folder that looks like it holds
-/// game data (e.g. disk 1 dropped next to the executable). The built-in data
+/// game data (e.g. edited assets next to the executable). The built-in data
 /// is always loaded first, so finding nothing is fine.
 fn find_data(explicit: Option<PathBuf>) -> Option<PathBuf> {
     if explicit.is_some() {
@@ -111,6 +134,21 @@ fn find_data(explicit: Option<PathBuf>) -> Option<PathBuf> {
     candidates.into_iter().find(|d| looks_right(d))
 }
 
+/// Sound output using the game's samples and tune.
+fn make_audio(data: &GameData, enabled: bool) -> audio::Audio {
+    let song = data
+        .music
+        .as_ref()
+        .and_then(|(name, d)| match formats::med::parse(d) {
+            Ok(s) => Some(std::sync::Arc::new(s)),
+            Err(e) => {
+                eprintln!("warning: music {name}: {e}");
+                None
+            }
+        });
+    audio::Audio::new(enabled, audio::Bank::from_sounds(&data.sounds), song)
+}
+
 fn main() -> ExitCode {
     let args = match parse_args() {
         Ok(a) => a,
@@ -126,8 +164,22 @@ fn main() -> ExitCode {
             };
         }
     };
+    if args.cmd == "unpack" {
+        return match unpack(args.data.as_deref().unwrap(), args.out.as_deref()) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("error: {e}");
+                ExitCode::FAILURE
+            }
+        };
+    }
     let root = find_data(args.data.clone());
-    let data = match GameData::load(root.as_deref()) {
+    // Converting disks must read only the disks, not the built-in assets.
+    let data = match if args.cmd == "extract" {
+        GameData::load_from(root.as_deref(), false)
+    } else {
+        GameData::load(root.as_deref())
+    } {
         Ok(d) => d,
         Err(e) => {
             eprintln!("{e}");
@@ -146,6 +198,7 @@ fn main() -> ExitCode {
         "render" => render_shot(data, &args),
         "bench" => bench(data, &args),
         "trace" => trace(data, &args),
+        "music" => render_music(&data, &args),
         _ => play(data, &args),
     };
     match result {
@@ -160,25 +213,73 @@ fn main() -> ExitCode {
 fn info(data: &GameData, dir: Option<&Path>) {
     let built_in = data::embedded::files().len();
     match (built_in, dir) {
-        (0, Some(d)) => println!("Data: {}", d.display()),
-        (n, Some(d)) => println!("Data: built in ({n} files), plus {}", d.display()),
-        (n, None) => println!("Data: built in ({n} files)"),
+        (0, Some(d)) => out!("Data: {}", d.display()),
+        (n, Some(d)) => out!("Data: built in ({n} files), plus {}", d.display()),
+        (n, None) => out!("Data: built in ({n} files)"),
     }
-    println!("Tracks:");
+    out!("Tracks:");
     for (i, entry) in data.tracks.iter().enumerate() {
         let from = match entry.source {
             data::TrackSource::Asset { .. } => "asset",
             data::TrackSource::Packed { .. } => "original data",
         };
         match data.load_track(i) {
-            Ok(t) => println!("  {:<10} {:>2} gates  ({from})", t.name, t.gates.len()),
-            Err(e) => println!("  {:<10} ERROR {e}", entry.name),
+            Ok(t) => out!("  {:<10} {:>2} gates  ({from})", t.name, t.gates.len()),
+            Err(e) => out!("  {:<10} ERROR {e}", entry.name),
         }
     }
-    println!("Vehicles:");
+    out!("Vehicles:");
     for v in &data.vehicles {
-        println!("  {:<10} ({})", v.name, v.id);
+        out!("  {:<10} ({})", v.name, v.id);
     }
+}
+
+/// Extracts every file from an ADF image or LHA archive, unpacking LHA
+/// archives found on disks. Files keep their stored (packed) form.
+fn unpack(input: &Path, out: Option<&Path>) -> Result<(), String> {
+    use formats::{adf::Adf, lha};
+    let out = out.ok_or("unpack needs --out DIR")?;
+    let data = std::fs::read(input).map_err(|e| format!("{}: {e}", input.display()))?;
+    let mut files: Vec<(String, Vec<u8>)> = Vec::new();
+    if input
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("adf"))
+    {
+        let adf = Adf::open(data).map_err(|e| e.to_string())?;
+        for f in adf.files().map_err(|e| e.to_string())? {
+            files.push((f.path, f.data));
+        }
+    } else {
+        files.push((input.file_name().unwrap().to_string_lossy().into(), data));
+    }
+    let mut failed = 0;
+    while let Some((path, data)) = files.pop() {
+        if path.to_lowercase().ends_with(".lha") {
+            for e in lha::parse(&data).map_err(|e| format!("{path}: {e}"))? {
+                match e.data {
+                    Ok(d) => files.push((e.path, d)),
+                    Err(why) => {
+                        eprintln!("FAILED {} ({}): {why}", e.path, e.method);
+                        failed += 1;
+                    }
+                }
+            }
+            continue;
+        }
+        // Keep paths inside `out`.
+        let safe: PathBuf = path
+            .split(['/', '\\'])
+            .filter(|c| !c.is_empty() && *c != "..")
+            .collect();
+        let dest = out.join(safe);
+        std::fs::create_dir_all(dest.parent().unwrap()).map_err(|e| e.to_string())?;
+        std::fs::write(&dest, &data).map_err(|e| format!("{}: {e}", dest.display()))?;
+        out!("{:>8}  {}", data.len(), path);
+    }
+    if failed > 0 {
+        return Err(format!("{failed} files could not be extracted"));
+    }
+    Ok(())
 }
 
 /// Writes every track and vehicle as editable assets, then reads each one
@@ -209,7 +310,10 @@ fn extract(data: &GameData, out: Option<&Path>) -> Result<(), String> {
         }
         write(dir.join("track.png"), &png)?;
         write(dir.join("track.txt"), txt.as_bytes())?;
-        println!("wrote {}", dir.display());
+        if let Some(thumb) = t.thumb_png() {
+            write(dir.join("thumb.png"), &thumb?)?;
+        }
+        out!("wrote {}", dir.display());
     }
     for v in &data.vehicles {
         let (png, txt) = (v.sheet_png()?, v.settings_text());
@@ -220,7 +324,40 @@ fn extract(data: &GameData, out: Option<&Path>) -> Result<(), String> {
         let dir = out.join("vehicles");
         write(dir.join(format!("{}.png", v.id)), &png)?;
         write(dir.join(format!("{}.txt", v.id)), txt.as_bytes())?;
-        println!("wrote {}", dir.join(&v.id).display());
+        if let Some(menu) = v.menu_png() {
+            write(dir.join(format!("{}-menu.png", v.id)), &menu?)?;
+        }
+        out!("wrote {}", dir.join(&v.id).display());
+    }
+    for (name, s) in &data.sounds {
+        let wav = formats::iff::sound_to_wav(s);
+        let back = formats::iff::wav_to_sound(&wav)?;
+        if back.data != s.data || back.rate != s.rate || back.loop_start != s.loop_start {
+            return Err(format!("sound {name}: WAV does not round-trip"));
+        }
+        let path = out.join("sounds").join(format!("{name}.wav"));
+        write(path.clone(), &wav)?;
+        out!("wrote {}", path.display());
+    }
+    if let Some((name, med)) = &data.music {
+        formats::med::parse(med).map_err(|e| format!("music {name}: {e}"))?;
+        let path = out.join("music").join(format!("{name}.med"));
+        write(path.clone(), med)?;
+        out!("wrote {}", path.display());
+    }
+    for (name, p) in &data.pictures {
+        let pal: Vec<data::palette::Rgb> = p
+            .palette
+            .iter()
+            .map(|c| data::palette::Rgb(c.0, c.1, c.2))
+            .collect();
+        let png = data::image::write_indexed(p.w, p.h, &pal, false, &p.pixels)?;
+        if data::image::read_indexed(&png, &pal)?.pixels != p.pixels {
+            return Err(format!("picture {name}: PNG does not round-trip"));
+        }
+        let path = out.join("gfx").join(format!("{name}.png"));
+        write(path.clone(), &png)?;
+        out!("wrote {}", path.display());
     }
     Ok(())
 }
@@ -228,7 +365,11 @@ fn extract(data: &GameData, out: Option<&Path>) -> Result<(), String> {
 /// Runs a race with computer drivers in the human seats and saves the screen.
 fn render_shot(data: GameData, args: &Args) -> Result<(), String> {
     let out = args.out.clone().ok_or("render needs --out FILE.png")?;
-    let mut app = App::new(data, audio::Audio::new(false));
+    let mut app = {
+        let audio = make_audio(&data, false);
+        App::new(data, audio)
+    };
+    app.settings.caravans = args.caravans;
     if args.menu {
         for _ in 0..(args.seconds / game::DT) as usize {
             app.update(&Input::default());
@@ -267,7 +408,7 @@ fn render_shot(data: GameData, args: &Args) -> Result<(), String> {
     let n = race.track.gates.len();
     for &i in &race.standings() {
         let e = &race.entrants[i];
-        println!(
+        out!(
             "{:<10} laps {} gates {} best {:?}",
             e.name,
             e.laps_done(n),
@@ -275,18 +416,26 @@ fn render_shot(data: GameData, args: &Args) -> Result<(), String> {
             e.best_lap
         );
     }
-    println!("wrote {}", out.display());
+    out!("wrote {}", out.display());
     Ok(())
 }
 
 /// Races four computer cars on every track and reports how they got on:
 /// a quick health check for the track decoding and the AI.
 fn bench(data: GameData, args: &Args) -> Result<(), String> {
-    let app = App::new(data, audio::Audio::new(false));
+    let mut app = {
+        let audio = make_audio(&data, false);
+        App::new(data, audio)
+    };
+    app.settings.caravans = args.caravans;
     let frames = (args.seconds / game::DT) as usize;
-    println!(
+    out!(
         "{:<10} {:>5} {:>8} {:>9} {:>8}",
-        "TRACK", "GATES", "LAPS", "BEST LAP", "ON ROAD"
+        "TRACK",
+        "GATES",
+        "LAPS",
+        "BEST LAP",
+        "ON ROAD"
     );
     for ti in 0..app.data.tracks.len() {
         let mut race = app.build_race(ti, 0, [0, 0], 4, 99, ti as u32 + 1)?;
@@ -314,7 +463,7 @@ fn bench(data: GameData, args: &Args) -> Result<(), String> {
         } else {
             app::fmt_time(best)
         };
-        println!(
+        out!(
             "{:<10} {:>5} {:>8} {:>9} {:>7.0}%",
             race.track.name,
             n,
@@ -326,11 +475,77 @@ fn bench(data: GameData, args: &Args) -> Result<(), String> {
     Ok(())
 }
 
+fn render_music(data: &GameData, args: &Args) -> Result<(), String> {
+    let out = args.out.clone().ok_or("music needs --out FILE.wav")?;
+    let (name, d) = data.music.as_ref().ok_or("no music in the data")?;
+    let song = std::sync::Arc::new(formats::med::parse(d).map_err(|e| format!("{name}: {e}"))?);
+    let rate = 44100u32;
+    let mut player = music::Player::new(song, rate as f64);
+    let frames = (args.seconds * rate as f32) as usize;
+    let mut pcm = Vec::with_capacity(frames * 4);
+    let mut peak = 0.0f32;
+    let mut wrapped_at = None;
+    let mut last_order = 0;
+    for i in 0..frames {
+        let (l, r) = player.next();
+        let order = player.order();
+        if order < last_order && wrapped_at.is_none() {
+            wrapped_at = Some(i as f32 / rate as f32);
+        }
+        last_order = order;
+        peak = peak.max(l.abs()).max(r.abs());
+        for v in [l, r] {
+            pcm.extend_from_slice(&((v.clamp(-1.0, 1.0) * 32767.0) as i16).to_le_bytes());
+        }
+    }
+    let mut wav = b"RIFF\0\0\0\0WAVEfmt ".to_vec();
+    wav.extend_from_slice(&16u32.to_le_bytes());
+    wav.extend_from_slice(&1u16.to_le_bytes());
+    wav.extend_from_slice(&2u16.to_le_bytes());
+    wav.extend_from_slice(&rate.to_le_bytes());
+    wav.extend_from_slice(&(rate * 4).to_le_bytes());
+    wav.extend_from_slice(&4u16.to_le_bytes());
+    wav.extend_from_slice(&16u16.to_le_bytes());
+    wav.extend_from_slice(b"data");
+    wav.extend_from_slice(&(pcm.len() as u32).to_le_bytes());
+    wav.extend(pcm);
+    let n = (wav.len() - 8) as u32;
+    wav[4..8].copy_from_slice(&n.to_le_bytes());
+    std::fs::write(&out, wav).map_err(|e| e.to_string())?;
+    out!(
+        "wrote {} ({:.0} s, peak {:.2}, position {})",
+        out.display(),
+        args.seconds,
+        peak,
+        player.position()
+    );
+    if let Some(t) = wrapped_at {
+        out!(
+            "the song loops back to the start after {}:{:04.1}",
+            (t / 60.0) as u32,
+            t % 60.0
+        );
+    }
+    Ok(())
+}
+
 fn trace(data: GameData, args: &Args) -> Result<(), String> {
     use data::track;
     let out = args.out.clone().ok_or("trace needs --out FILE.png")?;
-    let app = App::new(data, audio::Audio::new(false));
-    let mut race = app.build_race(args.track.saturating_sub(1), 0, [0, 0], 4, 99, 1)?;
+    let mut app = {
+        let audio = make_audio(&data, false);
+        App::new(data, audio)
+    };
+    app.settings.caravans = args.caravans;
+    // Same seed as `bench` uses for this track, so problems seen there can be traced.
+    let mut race = app.build_race(
+        args.track.saturating_sub(1),
+        0,
+        [0, 0],
+        4,
+        99,
+        args.track.max(1) as u32,
+    )?;
     let mut img = race.track.rgb();
     let plot = |img: &mut Vec<u32>, wx: f32, wy: f32, c: u32| {
         let (x, y) = track::to_screen(wx, wy);
@@ -359,7 +574,7 @@ fn trace(data: GameData, args: &Args) -> Result<(), String> {
     }
     let n = race.track.gates.len();
     for e in &race.entrants {
-        println!(
+        out!(
             "{:<8} laps {} next gate {}",
             e.name,
             e.laps_done(n),
@@ -385,7 +600,10 @@ fn play(data: GameData, args: &Args) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     // PAL Amigas ran at 50 frames per second; the simulation is tied to it.
     window.set_target_fps(50);
-    let mut app = App::new(data, audio::Audio::new(!args.mute));
+    let mut app = {
+        let audio = make_audio(&data, !args.mute);
+        App::new(data, audio)
+    };
     while window.is_open() && !app.quit {
         let input = Input {
             held: window.get_keys(),

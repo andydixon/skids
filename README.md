@@ -3,14 +3,17 @@
 A cross-platform (Windows, macOS, Linux) engine written in Rust that plays
 *Super Skidmarks* (Acid Software, 1995) on the original Amiga data.
 
-The game's data was converted from the original ADF disk images (disks 2–6
-of the six-disk set) into editable files in [`assets/`](assets/README.md).
-The images themselves are no longer kept in this repository.
+The game's data was converted from the six original ADF disk images into
+editable files in [`assets/`](assets/README.md). The images themselves
+aren't kept in this repository.
 
 - **Each track:** a 16-colour PNG (the PNG's palette is the track's
   palette), plus a text file with the lap gates and height map.
-- **Each car:** a PNG sprite sheet, plus a text file with its name and
-  handling.
+- **Each car:** a PNG sprite sheet and menu picture, plus a text file with
+  its name, driver and handling.
+- **Sounds:** WAV files.
+- **Music:** the tune, as an OctaMED module.
+- **Pictures:** the title picture and a few other images, as PNGs.
 
 Edit them with any image editor or text editor. The build embeds the
 `assets/` folder, so the finished program is a single self-contained file.
@@ -24,36 +27,33 @@ give either to also gets the game data.
 
 ## What works
 
-- All 24 tracks across the four track files. Each has its isometric height
-  map and lap gates.
-- All 8 vehicles (Mini, Beetle, Porsche, Formula 1, Midget, Truck, Police,
-  Cow), with 32 headings and 25 body-tilt frames for hills.
+- All 24 tracks across the four track files, in their original palettes.
+  Each has its isometric height map and lap gates.
+- All 9 cars (Mini, Beetle, Porsche, Formula 1, Midget, Truck, Police,
+  Cow, Camaro) with their drivers' names, each with 32 headings and 25
+  body-tilt frames for hills.
+- The caravan: turn on **Caravans** in the menu and every car tows one.
+- The original sound effects, and the original tune played by a built-in
+  OctaMED player. The menu has a **Music** option: menus, always, or off.
+- The original title picture.
 - 1 or 2 players (split screen) plus up to 7 computer drivers.
 - Power-slide handling, slopes, car-to-car bumping, and skid marks burnt
   into the track.
 - Lap and position tracking, lap times, and a results table.
-- Procedural engine, tyre and crash sound.
+- Engine note pitched with revs, tyre screech, crashes, backfires, a horn
+  and start beeps, all from the original samples.
 
 ## What's reconstructed
 
-Disk 1 of the six-disk set is missing from this archive. It held the
-executable, palettes, sound and music. As a result:
+The executable is on disk 1, but its game logic, a compiled Blitz Basic 2
+program, hasn't been decoded. So the **handling, computer drivers and race
+rules** are new code written to feel like the original, not a translation
+of it.
 
-- **Handling, AI and race rules** are new code written to feel like the
-  original, not a translation of the original 68000 code.
-- **Colours** come from a reconstructed palette, built around how the
-  tracks use their 16 colour indices. If you have the real palettes, put
-  them in a `palettes/` folder next to the disks as `.pal` files (16 lines
-  of `RRGGBB`):
-  - `track1-3.pal` for one track
-  - `track1.pal` for all six tracks in a file
-  - `default.pal` for everything
-- **Sound** is synthesised.
-
-If you find disk 1, drop it in with the others. Anything it contains under
-`track/` or `vehicles/` is picked up automatically. The format notes in
-[docs/FORMATS.md](docs/FORMATS.md) cover everything reverse engineered so
-far.
+Each car's original settings file has eleven handling numbers whose
+meaning lives in that code. They're kept in the car's settings asset for
+when it is decoded. [docs/FORMATS.md](docs/FORMATS.md) covers everything
+reverse engineered so far.
 
 ## Running
 
@@ -76,6 +76,7 @@ exists both as an asset and on disk, the asset wins.
 | Accelerate  | ↑ (or W in one-player games)          | W        |
 | Brake / reverse | ↓ (or S)                          | S        |
 | Steer       | ← → (or A D)                          | A D      |
+| Horn        | Right Shift                           | Left Shift |
 | Pause       | P                                     |          |
 | Leave race  | Esc                                   |          |
 
@@ -89,6 +90,8 @@ skids extract --data ADFS [--out assets]  # convert original disks into editable
 skids bench   --data DIR --seconds 120    # race CPU cars on every track: laps and time on road
 skids trace   --data DIR --track 11 --out t.png   # plot CPU racing lines
 skids render  --data DIR --track 3 --out shot.png # headless screenshot
+skids music   --out tune.wav --seconds 60     # render the tune to WAV
+skids unpack  disk.adf --out files/           # extract a disk or LHA archive as-is
 ```
 
 ## Building
@@ -114,11 +117,12 @@ GitHub Actions builds all three platforms on every push
 ```
 assets/        the game data as editable PNG and text files
 build.rs       embeds assets/ into the executable
-src/formats/   ADF (OFS/FFS), LHA and CrunchMania readers
+src/formats/   ADF (OFS/FFS), LHA (incl. -lh5-), CrunchMania, IFF 8SVX/ILBM, OctaMED
 src/data/      track, vehicle and palette decoding; locating the game files
 src/game/      physics, AI and race rules
 src/render/    software renderer at 320×256 (PAL low-res) and a bitmap font
-src/audio.rs   synthesised sound (cpal)
+src/audio.rs   sample mixer and sound effects (cpal)
+src/music.rs   OctaMED player
 src/app.rs     menus, race screens and results
 ```
 

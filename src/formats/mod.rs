@@ -6,7 +6,10 @@
 
 pub mod adf;
 pub mod crm;
+pub mod iff;
 pub mod lha;
+pub mod lzh;
+pub mod med;
 
 pub(crate) fn be16(d: &[u8], off: usize) -> u16 {
     u16::from_be_bytes([d[off], d[off + 1]])

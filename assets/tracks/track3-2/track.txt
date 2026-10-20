@@ -30,6 +30,9 @@ gate 498.8125 807.25 578.75 940.28125
 gate 566.5 820.5 690.75 890.25
 gate 597.75 790.3125 707.8125 768.96875
 
+# Name of the set of tracks this one belongs to, shown in the menu.
+set Surf 'n' Slam
+
 # As stored in the original data; not used by the game.
 start 475 288
 flags 0

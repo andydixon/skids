@@ -1,6 +1,13 @@
 # Skids vehicle settings. Lines starting with # are comments.
 # The sprite sheet is midget.png: 32 headings across, 25 tilts down.
 name MIDGET
+driver ROB
+# yes = towed behind cars (Caravans option) instead of driven
+trailer no
+# The 16 values from the original .set file. Their meaning is not
+# decoded yet, so the game does not use them; the handling below is
+# a reconstruction.
+original 51 21 30 16 3 45 16 13 44 13 93 0 0 0 0 0
 # top speed on tarmac, world pixels per second
 top 205
 # acceleration and braking, world pixels per second squared
