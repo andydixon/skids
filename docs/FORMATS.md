@@ -1,8 +1,8 @@
 # Super Skidmarks data formats
 
 Notes from reverse engineering the AGA/CD32 release of *Super Skidmarks*
-(Acid Software, 1995), worked out from all six disks. The one thing not
-yet decoded is the executable's game logic. See [Gaps](#gaps).
+(Acid Software, 1995), worked out from all six disks and from the main
+executable's machine code. See [Gaps](#gaps) for what's still unknown.
 
 All multi-byte values are big-endian unless noted.
 
@@ -70,7 +70,7 @@ The last 142 bytes of section 0 hold:
 |--------|------|----------|
 | 0      | 2    | File number (1–4) |
 | 2      | 96   | The palette shared by the file's six tracks: 16 colours × R, G, B, each a `u16` from 0 to 15 (Amiga 12-bit colour) |
-| 98     | 12   | Unknown |
+| 98     | 12   | Six `u16`, one per track, meaning unknown. The values are 0–5, some with bit 6 (`0x40`) set, plus one `0x3F`. |
 | 110    | …    | The name of the set of tracks, NUL-terminated |
 
 The first 20480 bytes of section 0 are the track-selector thumbnails:
@@ -88,38 +88,63 @@ Each track section unpacks to 281240 (`0x44A98`) bytes:
 
 | Offset   | Size   | Contents |
 |----------|--------|----------|
-| `0x0000` | 8192   | Height map: 64 × 64 `u16`, 8.8 fixed point, row-major. Each cell covers 16 × 8 screen pixels. |
+| `0x0000` | 8192   | Height map: 64 rows (world y) × 64 `u16` (world x). Each cell is one unit of the game's world; the ground there is value / 64 pixels high. |
 | `0x2000` | 8192   | Unused, zero on every track. |
-| `0x4000` | 8      | `u16` gate count, `u16` start x, `u16` start y, `u16` flags. |
-| `0x4008` | 8 × n  | Gates: `x1 y1 x2 y2`, world coordinates × 32. The list repeats after the last gate. |
-| …        |        | Unknown data, mostly a bit pattern, up to `0x4A98`. |
+| `0x4000` | 8      | `u16` index of the last gate (so the track has one more gate than this), `u16` start x, `u16` start y, `u16` flags. |
+| `0x4008` | 70 × 8 | Gate slots: `x1 y1 x2 y2`, world coordinates × 32 (× 512 in the game's own units). Slots after the last gate repeat the list from the start. |
+| `0x4238` | 2144   | Unknown. 88 bytes of mostly doubled bytes, then what looks like leftover picture data. |
 | `0x4A98` | 4 × 65536 | Four non-interleaved 1024 × 512 bitplanes, giving 16 colours. |
+
+The executable replaces the start point and flags of two tracks with
+fixed values: (844, 50, flags 1) for file 1's track 2 and (187, 119, flags 0)
+for file 2's track 4. It isn't clear whether those track numbers count from
+0 or 1.
 
 ### Track geometry
 
 Gates are line segments across the road and run in race order; gate 0 is
 the start/finish line. They're defined on an isometric ground plane rotated
-45° to the picture. The projection that best fits the data is:
+45° to the picture.
+
+The rest of this section uses this port's world units, which are 1/16 of
+the game's own unit (the 16.16 fixed-point values the executable works in).
+So a height-map cell is 16 × 16 units.
+
+The executable projects a point `z` pixels above the ground plane like
+this:
 
 ```
 screen x = wx - wy + 512
-screen y = (wx + wy) × 31/64 - 252
+screen y = (wx + wy) / 2 - 156 - z
 ```
 
-With these constants, 96% of points sampled along the gates land on road
-pixels across all 24 tracks (92% minimum). A plain screen-aligned 2:1 squash
-gives 40–70%. Adding a height term doesn't improve the fit, so the height
-map is used only for slope physics and body tilt.
+The car sprite position uses 182 in place of 156, putting the sprite's top
+left 26 pixels higher. With `z` set to the ground height, 98% of points
+sampled along the gates land on road pixels across all 24 tracks.
+
+**Walls.** The gates are also the control points of the road edges:
+- **The curves:** routine `$24670` evaluates a uniform quadratic B-spline
+  through the gates' first ends for one edge, and their second ends for
+  the other. At parameter `i + f` that is
+  `(1-f)²/2 · G[i] + (1/2 + f - f²) · G[i+1] + f²/2 · G[i+2]`.
+- **Zones:** at set-up the game cuts the road into zones, two per gate,
+  between consecutive cross-sections of the two curves. Each zone's four
+  sides are tested against the car (routine `$25b2c`).
+- **Collisions:** crossing a side edge is a wall hit; crossing the front
+  or back moves the car on to the next or previous zone.
+- **Fit:** points 5% in from either edge are on road pixels 95% of the
+  time, and points 15% outside only 25% of the time. So the curves follow
+  the painted road edge.
 
 The stored start point is on the road for 14 of the 24 tracks read as screen
-coordinates, and 10 read as world coordinates. It isn't used; the grid forms
-up behind gate 0.
+coordinates, and 10 read as world coordinates. The game seems to use it for
+the starting camera position. This port forms the grid up behind gate 0.
 
 ### Road and scenery
 
 Colours 8–15 are the driving surface on every track, so the fourth
-bitplane is effectively a road mask. Off the road means less grip and
-lower speed.
+bitplane is effectively a road mask. The game's physics don't read the
+picture; the walls keep cars on the road.
 
 ## Vehicles
 
@@ -153,15 +178,56 @@ intact when read directly from the disk image.
 
 - **Header:** the car's name and its driver's name, each followed by a
   newline.
-- **Settings:** 16 `u16` values. Eleven are used by the cars; the rest are
-  zero. The caravan's values differ in kind; two of them are −4.
+- **Settings:** 16 `u16` values (see below). The caravan's values aren't
+  driving values; two of them are −4.
 - **Menu picture:** 512 bytes. A 64 × 32 picture in two bitplanes, plane 0
   (256 bytes) then plane 1.
 
-The settings are clearly handling values. The first is smallest for the
-Cow, the second largest for the F1, and the Police car and Porsche are
-nearly identical. What each one means lives in the executable and isn't
-decoded yet.
+Routine `$332a` copies the settings into each car, as 16.16 fixed point
+with these shifts. Word `k` is the `k`th `u16`, counting from 0:
+
+| Word | Car field | Value | Meaning |
+|------|-----------|-------|---------|
+| 0 | `$bc` | w / 64  | drag (computer drivers) |
+| 1 | `$e2` | w / 512 | grip (computer drivers) |
+| 2 | `$e6` | w / 16  | steering, 64ths of a turn per frame |
+| 3 | `$c0` | −w / 64 | stored but never read |
+| 4 | `$106` | w / 8  | gravity, pixels per frame² |
+| 5 | `$b8` | w / 512 | power (computer drivers) |
+| 6 | (towing) | w / 32 | tow hitch distance behind the car, in game units |
+| 8 | `$bc` | w / 64  | drag (human drivers) |
+| 9 | `$e2` | w / 512 | grip (human drivers) |
+| 10 | `$b8` | w / 512 | power (human drivers) |
+
+Words 7 and 11–15 aren't read. [Game logic](#game-logic) shows how drag,
+grip and power work together. In short, top speed is
+`power × drag / (1 − drag)` game units per frame. For the Camaro that is
+271 of this port's units a second for human drivers and 186 for computer
+ones.
+
+### Handling presets
+
+The race menu's handling option is CUSTOM (each car's own settings, as
+above) or one of six presets that replace them for every car. The table
+is at `$21dc6`, 8 bytes each. Bytes 0–2 are for human drivers, 3–5 for
+computer drivers, and byte 6 is steering for both:
+
+| Preset | Human | Computer | Steering |
+|--------|-------|----------|----------|
+| CLASSIC | 98 26 24 | 98 24 24 | 44 |
+| GRUNTY | 92 40 30 | 108 33 25 | 60 |
+| ZIPPY | 102 61 47 | 115 59 45 | 64 |
+| RIPPY | 100 80 60 | 110 50 60 | 72 |
+| SLIPPERY | 25 127 101 | 29 45 122 | 68 |
+| PEDAL CAR | 117 23 17 | 104 17 10 | 30 |
+
+For a preset `(a, t, g)`:
+- drag = a/128 × 0.98 + 0.01
+- p = t/16 × (1/drag − 1), and power = p/8
+- grip = g/256 / p / drag / 8
+- steering = byte 6 / 32, gravity = 0.5
+
+So top speed is simply t/128 game units per frame.
 
 ## Sounds (`sfx/*.iff`, `gfx/*.iff`)
 
@@ -208,6 +274,82 @@ The song uses these commands:
 module second by second through the whole song (correlation 0.996 over the
 first minute), and it loops at the same point.
 
+## Game logic
+
+`SKIDMARKS_CD³²` is one code hunk of 222,032 bytes, compiled from Blitz
+Basic 2. Addresses below are offsets into it. All arithmetic is 16.16
+fixed point (multiply at `$2ceda`, divide at `$2e122`).
+
+### Car record
+
+Each car is a 266-byte (`$10a`) record:
+
+| Offset | Field |
+|--------|-------|
+| `$0`, `$4`, `$8` | x, y, height z |
+| `$c`, `$10`, `$14` | velocity x, y, vertical |
+| `$18`, `$1c` | this frame's velocity change |
+| `$58`, `$5c` | heading (64 per turn) and turn rate |
+| `$60`, `$64` | heading vector, from sine/cosine tables of 64 entries |
+| `$68` | computer steering, −1, 0 or 1 |
+| `$6c`, `$6e` | pitch and roll notch, 0–4 |
+| `$76` | controller: 0–7 for joysticks and keyboards, 8 for computer |
+| `$78` | sprite frame: roll × 160 + pitch × 32 + heading / 2 |
+| `$7a` | airborne |
+| `$7e` | state: negative while racing, 1 while warping |
+| `$a6` | engine speed |
+| `$aa` | forward speed |
+| `$b8`, `$bc`, `$e2`, `$e6`, `$106` | handling (above) |
+| `$d2`, `$d6` | links to the car towing this one, and the one it tows |
+| `$ea` | zone (half-gate) progress |
+
+### One frame
+
+The race loop runs at 50 Hz. Each car gets steering (`$1c618`), drawing
+(`$1cafa`), and moving (`$1982c`) in turn. While drawing, a car sprite
+is skipped if the beam is already past a given line, so a frame always
+fits in one field. Then `$247ac` integrates every car.
+
+1. **Steering:**
+   - Input is −1, 0 or 1, from the joystick or the computer driver.
+   - turn = (turn + input × steering) / 2. Airborne cars can't steer, and
+     their turn rate is limited to ±1.
+2. **Height:**
+   - vertical −= gravity.
+   - The car looks two frames ahead: if `z + 2 × vertical` is still above
+     the ground at `pos + 2 × velocity`, it's airborne.
+   - Otherwise vertical = (ground there − z) / 2.
+   - Pitch and roll each step one notch a frame towards
+     `floor(rise + 2.5)`, clamped to 0–4. The rise is the ground height
+     change over 0.2 units along world y (pitch) or world −x (roll).
+   - heading += turn.
+3. **Engine and grip**, skipped while airborne:
+   - throttle is −1, 0 or 1. Half the vertical speed is taken off it
+     going forwards (added going backwards), so hills slow cars down and
+     speed them up.
+   - target = (engine speed + throttle × power) × drag
+   - change = grip × (heading vector × target − velocity)
+   - engine speed += (target − engine speed) / 4
+4. **Walls:**
+   - The zone test runs on `pos + 4 × velocity + 10 × change`.
+   - On a wall the velocity points back off it. The car is held at the
+     contact point and loses 1.5× its velocity into the wall, so it
+     bounces back at half speed.
+   - Crossing a zone's front or back moves `$ea` on, and counts the laps.
+5. **Integrate:** velocity += change, position += velocity, z += vertical.
+
+A warping car (state 1) instead flies straight at a point on the track:
+its velocity is the distance to it / 16.
+
+### Computer drivers
+
+Computer cars use words 0, 1 and 5 for handling rather than 8, 9 and 10.
+They steer with the sign of the cross product between their heading and
+the direction to a target point, as if holding a joystick hard over. The
+targets come from a table of points built along the road. The driver
+picks one side of the road or the other depending on which way the road
+bends, and the throttle comes from fixed values.
+
 ## Executables
 
 - **`SKIDMARKS_CD³²`** (237 KB): a single-hunk compiled Blitz Basic 2
@@ -217,12 +359,16 @@ first minute), and it loops at the same point.
 
 ## Gaps
 
-- **Game logic.** The handling, AI and rules in the executable aren't
-  decoded; this port's versions are reconstructions. Decoding the `.set`
-  values would be the first step towards the original handling.
-- **Unknown data:** the 12 bytes after each track file's palette, the bit
-  pattern after the gates in each track section, and the colours of
-  `ball.spr` (probably set by the executable).
+- **Game logic still to decode:**
+  - car-to-car collisions
+  - exactly how computer drivers pick target points and throttle
+  - the warp rules
+  - the towing physics, beyond the hitch distance
+  - the race rules and scoring
+- **Unknown data:**
+  - the six per-track words after each track file's palette
+  - the 2144 bytes after the gate slots in each track section
+  - the colours of `ball.spr`, probably set by the executable
 
 The engine's own editable formats, which `skids extract` converts all of
 the above into, are described in [assets/README.md](../assets/README.md).

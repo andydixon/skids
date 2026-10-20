@@ -4,20 +4,14 @@ name BEETLE
 driver ROB
 # yes = towed behind cars (Caravans option) instead of driven
 trailer no
-# The 16 values from the original .set file. Their meaning is not
-# decoded yet, so the game does not use them; the handling below is
-# a reconstruction.
-original 57 28 32 12 3 29 20 14 51 15 63 0 0 0 0 0
-# top speed on tarmac, world pixels per second
-top 185
-# acceleration and braking, world pixels per second squared
-accel 160
-brake 320
-# sideways grip (higher = less sliding)
-grip 4.6
-# steering rate, radians per second
-turn 3.6
-# weight in collisions
+#
+# handling: the 16 values from the original .set file, used as the
+# original game does. Counting from 1:
+#   1 2 6    computer drivers: drag, grip, power
+#   9 10 11  human drivers: drag, grip, power
+#   3 steering, 5 gravity, 7 tow hitch distance; the rest are unused.
+# Top speed = power * drag / (64 - drag) / 32 world units per frame,
+# 50 frames a second (drag below 64). Higher grip, less sliding.
+handling 57 28 32 12 3 29 20 14 51 15 63 0 0 0 0 0
+# weight when cars collide (not from the original data)
 mass 1
-# speed and grip multiplier off the road
-offroad 0.55
