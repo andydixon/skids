@@ -13,18 +13,27 @@
 //!         name of the set of tracks, NUL-terminated.
 //!
 //! Each track section (281240 bytes once decrunched):
-//!   0x0000  height map, 64x64 BE16 8.8 fixed point, one cell per 16x8 pixels
+//!   0x0000  height map, 64x64 BE16, row-major by world y then x. Each cell
+//!           is one unit of the original's world (16 of ours); the ground
+//!           stands value / 64 pixels above the plane
 //!   0x2000  8192 bytes, unused (always zero on the retail disks)
-//!   0x4000  BE16 gate count, start x, start y (screen pixels), flags
-//!   0x4008  gates: x1 y1 x2 y2 BE16, world coordinates in 1/32 units
+//!   0x4000  BE16 last gate index (one less than the gate count), start x,
+//!           start y (screen pixels), flags
+//!   0x4008  70 gate slots: x1 y1 x2 y2 BE16, world coordinates in 1/32
+//!           units. Slots past the last gate repeat the list.
 //!   0x4A98  four 1024x512 bitplanes (65536 bytes each), giving 16 colours
 //!
-//! The world is an isometric ground plane rotated 45 degrees to the picture:
-//! screen x = wx - wy + 512, screen y = (wx + wy) * 31/64 - 252. The constants
-//! were fitted so that 96% of gate samples over all 24 tracks land on road
-//! pixels (against 40-70% for a plain 2:1 squash). The stored start point
-//! only lands on the road on 14 of the 24 tracks, so the grid is placed from
-//! the gates instead.
+//! The world is an isometric ground plane rotated 45 degrees to the picture.
+//! The executable projects a point at height z (pixels) with
+//! screen x = wx - wy + 512, screen y = (wx + wy) / 2 - 156 - z, which puts
+//! 98% of gate samples over all 24 tracks on road pixels once z is the
+//! ground height. The stored start point only lands on the road on 14 of
+//! the 24 tracks, so the grid is placed from the gates instead.
+//!
+//! The gates are also the control points of the road edges: the executable
+//! runs a uniform quadratic B-spline through the gates' first ends for one
+//! edge and their second ends for the other, and those curves are the
+//! walls. They follow the painted road edge closely (see `Track::edges`).
 
 use super::image;
 use super::palette::{self, Rgb};
@@ -35,19 +44,24 @@ pub const W: usize = 1024;
 pub const H: usize = 512;
 pub const HM_W: usize = 64;
 pub const HM_H: usize = 64;
-pub const CELL_W: f32 = (W / HM_W) as f32;
-pub const CELL_H: f32 = (H / HM_H) as f32;
+/// World units per height-map cell: one unit of the original's world.
+pub const CELL: f32 = 16.0;
+/// Samples per gate along the road edges.
+pub const EDGE_STEPS: usize = 8;
 const SECTION_SIZE: usize = 0x44a98;
 const GATES_AT: usize = 0x4000;
+/// Room for gates in a track section; slots past the last gate repeat the
+/// list from the start.
+const GATE_SLOTS: usize = 70;
 const PLANES_AT: usize = 0x4a98;
 const PLANE_SIZE: usize = W * H / 8;
 const SECTIONS: usize = 7;
 const ISO_X0: f32 = 512.0;
-const ISO_Y_SCALE: f32 = 31.0 / 64.0;
-const ISO_Y0: f32 = -252.0;
+const ISO_Y0: f32 = -156.0;
 
-pub fn to_screen(wx: f32, wy: f32) -> (f32, f32) {
-    (wx - wy + ISO_X0, (wx + wy) * ISO_Y_SCALE + ISO_Y0)
+/// Screen position of a world point `z` pixels above the ground plane.
+pub fn project(wx: f32, wy: f32, z: f32) -> (f32, f32) {
+    (wx - wy + ISO_X0, (wx + wy) * 0.5 + ISO_Y0 - z)
 }
 
 pub fn on_screen(sx: f32, sy: f32, margin: f32) -> bool {
@@ -89,10 +103,13 @@ pub struct Track {
     /// Palette indices, W x H.
     pub pixels: Vec<u8>,
     pub palette: [Rgb; 16],
-    /// Height samples in 8.8 fixed point.
+    /// Height samples; the ground is value / 64 pixels high.
     pub height: Vec<u16>,
     /// Gates in world coordinates.
     pub gates: Vec<Gate>,
+    /// The road edges sampled EDGE_STEPS times per gate, as a closed loop
+    /// of cross-sections (one point on each edge). Built from the gates.
+    pub edges: Vec<Gate>,
     /// Start position and flags as stored. Kept for reference: the start
     /// point does not line up with the road reliably, and the flags' meaning
     /// is unknown.
@@ -201,10 +218,11 @@ impl Track {
         }
         let height = (0..HM_W * HM_H).map(|i| be16(d, i * 2)).collect();
 
-        let count = be16(d, GATES_AT) as usize;
+        // The stored value is the index of the last gate.
+        let count = be16(d, GATES_AT) as usize + 1;
         let start = (be16(d, GATES_AT + 2) as f32, be16(d, GATES_AT + 4) as f32);
         let flags = be16(d, GATES_AT + 6);
-        if count == 0 || GATES_AT + 8 + count * 8 > PLANES_AT {
+        if count > GATE_SLOTS {
             return Err(format!("implausible gate count {count}"));
         }
         let gates = (0..count)
@@ -242,28 +260,35 @@ impl Track {
             thumbnail: None,
             height,
             gates,
+            edges: Vec::new(),
             start,
             flags,
-        })
+        }
+        .with_edges())
     }
 
-    /// Ground height (in height units) at a screen position, bilinear.
-    pub fn height_at(&self, sx: f32, sy: f32) -> f32 {
-        let fx = (sx / CELL_W - 0.5).clamp(0.0, (HM_W - 1) as f32);
-        let fy = (sy / CELL_H - 0.5).clamp(0.0, (HM_H - 1) as f32);
+    fn with_edges(mut self) -> Track {
+        self.edges = edges(&self.gates);
+        self
+    }
+
+    /// Ground height in pixels at a world position, bilinear between cells
+    /// as the executable does.
+    pub fn ground(&self, wx: f32, wy: f32) -> f32 {
+        let fx = (wx / CELL).clamp(0.0, (HM_W - 1) as f32);
+        let fy = (wy / CELL).clamp(0.0, (HM_H - 1) as f32);
         let (x0, y0) = (fx as usize, fy as usize);
         let (x1, y1) = ((x0 + 1).min(HM_W - 1), (y0 + 1).min(HM_H - 1));
         let (tx, ty) = (fx - x0 as f32, fy - y0 as f32);
-        let h = |x: usize, y: usize| self.height[y * HM_W + x] as f32 / 256.0;
+        let h = |x: usize, y: usize| self.height[y * HM_W + x] as f32 / 64.0;
         let top = h(x0, y0) * (1.0 - tx) + h(x1, y0) * tx;
         let bot = h(x0, y1) * (1.0 - tx) + h(x1, y1) * tx;
         top * (1.0 - ty) + bot * ty
     }
 
-    /// Height at a world position.
-    pub fn height_world(&self, wx: f32, wy: f32) -> f32 {
-        let (sx, sy) = to_screen(wx, wy);
-        self.height_at(sx, sy)
+    /// Screen position of a point on the ground.
+    pub fn to_screen(&self, wx: f32, wy: f32) -> (f32, f32) {
+        project(wx, wy, self.ground(wx, wy))
     }
 
     pub fn pixel(&self, sx: f32, sy: f32) -> u8 {
@@ -279,7 +304,7 @@ impl Track {
     }
 
     pub fn on_road_world(&self, wx: f32, wy: f32) -> bool {
-        let (sx, sy) = to_screen(wx, wy);
+        let (sx, sy) = self.to_screen(wx, wy);
         on_screen(sx, sy, 0.0) && self.on_road(sx, sy)
     }
 
@@ -382,9 +407,11 @@ impl Track {
             thumbnail: None,
             height,
             gates,
+            edges: Vec::new(),
             start,
             flags,
-        })
+        }
+        .with_edges())
     }
 
     /// The thumbnail as an indexed PNG in the track's palette.
@@ -414,11 +441,14 @@ impl Track {
             "# Skids track {}. Lines starting with # are comments.\n\
              #\n\
              # The picture is track.png: 1024x512, 16 colours. Its palette is the\n\
-             # track's palette. Colours 8-15 are road (full grip), 0-7 are scenery.\n\
+             # track's palette. Colours 8-15 are road, 0-7 are scenery (dusty).\n\
              #\n\
              # gate x1 y1 x2 y2: lap gates in race order, in world units. Gate 0 is\n\
-             # the start/finish line; the grid forms up behind it. World to picture:\n\
-             #   picture x = wx - wy + 512, picture y = (wx + wy) * 31/64 - 252\n",
+             # the start/finish line; the grid forms up behind it. The gates' ends\n\
+             # also shape the walls: each edge of the road is a smooth curve\n\
+             # through the matching ends of the gates. World to picture, for a\n\
+             # point at height z (pixels):\n\
+             #   picture x = wx - wy + 512, picture y = (wx + wy) / 2 - 156 - z\n",
             self.name
         );
         for g in &self.gates {
@@ -427,8 +457,8 @@ impl Track {
         t.push_str(&format!(
             "\n# Name of the set of tracks this one belongs to, shown in the menu.\nset {}\n\n\
              # As stored in the original data; not used by the game.\nstart {} {}\nflags {}\n\n\
-             # height: 64 rows of 64 values, ground height x 256. Each value covers\n\
-             # 16x8 pixels of the picture.\nheight\n",
+             # height: 64 rows (world y) of 64 values (world x), ground height in\n\
+             # pixels x 64. Each value covers 16 x 16 world units.\nheight\n",
             self.set_name, self.start.0, self.start.1, self.flags
         ));
         for row in self.height.chunks(HM_W) {
@@ -442,5 +472,64 @@ impl Track {
     pub fn rgb(&self) -> Vec<u32> {
         let pal: Vec<u32> = self.palette.iter().map(|c| c.to_u32()).collect();
         self.pixels.iter().map(|&i| pal[i as usize]).collect()
+    }
+}
+
+/// The road edges: a uniform quadratic B-spline through the gates' ends,
+/// sampled EDGE_STEPS times per gate. Sample k * EDGE_STEPS lies halfway
+/// between gates k and k + 1, as in the executable.
+pub fn edges(gates: &[Gate]) -> Vec<Gate> {
+    let n = gates.len();
+    if n < 3 {
+        return gates.to_vec();
+    }
+    let mut out = Vec::with_capacity(n * EDGE_STEPS);
+    for i in 0..n {
+        let (p0, p1, p2) = (gates[i], gates[(i + 1) % n], gates[(i + 2) % n]);
+        for s in 0..EDGE_STEPS {
+            let f = s as f32 / EDGE_STEPS as f32;
+            let (w0, w2) = ((1.0 - f) * (1.0 - f) * 0.5, f * f * 0.5);
+            let w1 = 1.0 - w0 - w2;
+            let mix = |a: (f32, f32), b: (f32, f32), c: (f32, f32)| {
+                (
+                    a.0 * w0 + b.0 * w1 + c.0 * w2,
+                    a.1 * w0 + b.1 * w1 + c.1 * w2,
+                )
+            };
+            out.push(Gate {
+                a: mix(p0.a, p1.a, p2.a),
+                b: mix(p0.b, p1.b, p2.b),
+            });
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn edges_run_between_gate_midpoints() {
+        let g = |x: f32| Gate {
+            a: (x, 0.0),
+            b: (x, 10.0),
+        };
+        let gates = [g(0.0), g(10.0), g(30.0), g(60.0)];
+        let e = edges(&gates);
+        assert_eq!(e.len(), gates.len() * EDGE_STEPS);
+        // Each gate's run of samples starts halfway between it and the next.
+        assert_eq!(e[0].a, (5.0, 0.0));
+        assert_eq!(e[EDGE_STEPS].b, (20.0, 10.0));
+        // In between, the curve stays inside the control polygon.
+        assert!(e[EDGE_STEPS / 2].a.0 > 5.0 && e[EDGE_STEPS / 2].a.0 < 20.0);
+    }
+
+    #[test]
+    fn projection_lifts_by_height() {
+        let (x0, y0) = project(100.0, 50.0, 0.0);
+        let (x1, y1) = project(100.0, 50.0, 10.0);
+        assert_eq!((x0, y0), (562.0, -81.0));
+        assert_eq!((x1, y1), (x0, y0 - 10.0));
     }
 }

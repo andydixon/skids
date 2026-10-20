@@ -39,18 +39,21 @@ USAGE:
     skids unpack  FILE.adf|FILE.lha --out DIR     extract every file from a disk image or archive
     skids music   [--data DIR] --out FILE.wav [--seconds S]
                                                   render the tune to a WAV file
-    skids render  [--data DIR] --out FILE.png [--track N] [--seconds S] [--players 1|2] [--menu] [--caravans]
+    skids render  [--data DIR] --out FILE.png [--track N] [--seconds S] [--players 1|2] [--menu] [--caravans] [--handling N]
                                                   simulate a race (or the menu) and save a frame
-    skids bench   [--data DIR] [--seconds S] [--caravans]
+    skids bench   [--data DIR] [--seconds S] [--caravans] [--handling N]
                                                   race computer cars on every track
-    skids trace   [--data DIR] --out FILE.png [--track N] [--seconds S]
-                                                  draw the computer cars' paths on a track
+    skids trace   [--data DIR] --out FILE.png [--track N] [--seconds S] [--handling N]
+                                                  draw the walls, gates and computer cars' paths
 
 The game data is built into the executable, so no disks are needed. --data
 adds to or overrides it with ADF images, LHA archives, or extracted track/,
 vehicles/ and palettes/ folders, or an assets folder of edits. Without
 --data, a folder like that in the current directory or next to the
 executable is picked up automatically.
+
+--handling picks the original's handling presets: 0 = each car's own
+(CUSTOM), 1-6 = CLASSIC, GRUNTY, ZIPPY, RIPPY, SLIPPERY, PEDAL CAR.
 
 CONTROLS:
     Player 1: arrow keys (or W A S D in one-player games)
@@ -68,6 +71,7 @@ struct Args {
     players: usize,
     menu: bool,
     caravans: bool,
+    handling: usize,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -82,6 +86,7 @@ fn parse_args() -> Result<Args, String> {
         players: 1,
         menu: false,
         caravans: false,
+        handling: 0,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -97,6 +102,12 @@ fn parse_args() -> Result<Args, String> {
             "--mute" => a.mute = true,
             "--menu" => a.menu = true,
             "--caravans" => a.caravans = true,
+            "--handling" => {
+                a.handling = val("--handling")?.parse().map_err(|_| "bad --handling")?;
+                if a.handling > data::vehicle::PRESETS.len() {
+                    return Err("--handling must be 0-6".into());
+                }
+            }
             "info" | "extract" | "render" | "bench" | "trace" | "music" | "play" => a.cmd = arg,
             "unpack" => {
                 a.cmd = arg;
@@ -370,6 +381,7 @@ fn render_shot(data: GameData, args: &Args) -> Result<(), String> {
         App::new(data, audio)
     };
     app.settings.caravans = args.caravans;
+    app.settings.handling = args.handling;
     if args.menu {
         for _ in 0..(args.seconds / game::DT) as usize {
             app.update(&Input::default());
@@ -399,7 +411,7 @@ fn render_shot(data: GameData, args: &Args) -> Result<(), String> {
             .entrants
             .iter_mut()
             .filter(|e| matches!(e.driver, game::Driver::Human(_)))
-            .map(|e| e.ai.drive(&e.car, &race.track, e.next_gate, game::DT, true))
+            .map(|e| e.ai.drive(&e.car, &race.track, game::DT, true))
             .collect();
         race.step(&controls);
         app::draw_race(&mut frame, &app.data, &race, &mut cams, players);
@@ -428,6 +440,7 @@ fn bench(data: GameData, args: &Args) -> Result<(), String> {
         App::new(data, audio)
     };
     app.settings.caravans = args.caravans;
+    app.settings.handling = args.handling;
     let frames = (args.seconds / game::DT) as usize;
     out!(
         "{:<10} {:>5} {:>8} {:>9} {:>8}",
@@ -537,6 +550,7 @@ fn trace(data: GameData, args: &Args) -> Result<(), String> {
         App::new(data, audio)
     };
     app.settings.caravans = args.caravans;
+    app.settings.handling = args.handling;
     // Same seed as `bench` uses for this track, so problems seen there can be traced.
     let mut race = app.build_race(
         args.track.saturating_sub(1),
@@ -547,18 +561,31 @@ fn trace(data: GameData, args: &Args) -> Result<(), String> {
         args.track.max(1) as u32,
     )?;
     let mut img = race.track.rgb();
-    let plot = |img: &mut Vec<u32>, wx: f32, wy: f32, c: u32| {
-        let (x, y) = track::to_screen(wx, wy);
+    let plot = |img: &mut Vec<u32>, t: &track::Track, wx: f32, wy: f32, c: u32| {
+        let (x, y) = t.to_screen(wx, wy);
         if track::on_screen(x, y, 0.0) {
             img[y as usize * track::W + x as usize] = c;
         }
     };
+    // The walls: both road edges.
+    let edges = &race.track.edges;
+    for (k, g) in edges.iter().enumerate() {
+        let h = edges[(k + 1) % edges.len()];
+        for i in 0..8 {
+            let f = i as f32 / 8.0;
+            for (p, q) in [(g.a, h.a), (g.b, h.b)] {
+                let (x, y) = (p.0 + (q.0 - p.0) * f, p.1 + (q.1 - p.1) * f);
+                plot(&mut img, &race.track, x, y, 0xc0c0c0);
+            }
+        }
+    }
     for (gi, g) in race.track.gates.iter().enumerate() {
         let c = if gi == 0 { 0xffff00 } else { 0xff2020 };
         for i in 0..=64 {
             let k = i as f32 / 64.0;
             plot(
                 &mut img,
+                &race.track,
                 g.a.0 + (g.b.0 - g.a.0) * k,
                 g.a.1 + (g.b.1 - g.a.1) * k,
                 c,
@@ -569,7 +596,7 @@ fn trace(data: GameData, args: &Args) -> Result<(), String> {
     for _ in 0..(args.seconds / game::DT) as usize {
         race.step(&[]);
         for (i, e) in race.entrants.iter().enumerate() {
-            plot(&mut img, e.car.x, e.car.y, TRAIL[i % 4]);
+            plot(&mut img, &race.track, e.car.x, e.car.y, TRAIL[i % 4]);
         }
     }
     let n = race.track.gates.len();
