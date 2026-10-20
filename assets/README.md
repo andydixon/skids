@@ -103,7 +103,6 @@ The display name, driver and handling:
 | `driver`  | driver's name, shown next to it |
 | `trailer` | `yes` for something towed behind cars (the caravan) rather than driven |
 | `handling`| the 16 values from the original `.set` file, used as the original game uses them (below) |
-| `mass`    | weight when cars collide; not from the original data |
 
 The `handling` values, counting from 1:
 
@@ -113,8 +112,8 @@ The `handling` values, counting from 1:
 | 9, 10, 11 | human drivers: drag, grip, power |
 | 3 | steering: 16 = 1/64 of a turn per frame at full lock |
 | 5 | gravity: 8 = 1 pixel per frame² |
-| 7 | tow hitch distance behind the car: 2 = 1 world unit |
-| 4, 8, 12–16 | unused |
+| 7, 8 | half the car's length and width, for collisions: 2 = 1 world unit. The tow hitch is at the back. |
+| 4, 12–16 | unused |
 
 What the driving values do:
 - **Drag** (below 64): how much of the engine's speed survives each frame.
@@ -128,9 +127,9 @@ What the driving values do:
 The menu's **Handling** option can replace every car's values with one of
 the original's presets.
 
-Older files with `original`, `top`, `accel`, `brake`, `grip`, `turn` and
-`offroad` lines still load: `original` is read as `handling`, and the
-others are ignored. To add a car, add a new `<id>.png` / `<id>.txt` pair.
+Older files with `original`, `top`, `accel`, `brake`, `grip`, `turn`,
+`offroad` and `mass` lines still load: `original` is read as `handling`,
+and the others are ignored. To add a car, add a new `<id>.png` / `<id>.txt` pair.
 
 ## Sounds: `sounds/*.wav`
 
