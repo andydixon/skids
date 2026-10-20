@@ -31,6 +31,9 @@ gate 761 667 688.5 575.5
 gate 645 675 623 573
 gate 550.4375 729.8125 495.75 655.25
 
+# Name of the set of tracks this one belongs to, shown in the menu.
+set Racing In The Name Of
+
 # As stored in the original data; not used by the game.
 start 608 305
 flags 0

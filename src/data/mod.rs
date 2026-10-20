@@ -14,7 +14,8 @@ pub mod palette;
 pub mod track;
 pub mod vehicle;
 
-use crate::formats::{adf::Adf, crm, lha};
+use crate::formats::iff::{self, Picture, Sound};
+use crate::formats::{adf::Adf, crm, lha, med};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -80,11 +81,8 @@ impl FileSet {
                 Ok(entries) => {
                     for e in entries {
                         match e.data {
-                            Some(d) => self.add(&e.path, d),
-                            None => self.warnings.push(format!(
-                                "{path}: {} uses unsupported method {}",
-                                e.path, e.method
-                            )),
+                            Ok(d) => self.add(&e.path, d),
+                            Err(why) => self.warnings.push(format!("{path}: {}: {why}", e.path)),
                         }
                     }
                 }
@@ -116,7 +114,11 @@ fn logical_key(path: &str) -> Option<String> {
         return None;
     }
     let (dir, name) = (&parts[n - 2], &parts[n - 1]);
-    matches!(dir.as_str(), "track" | "vehicles" | "palettes").then(|| format!("{dir}/{name}"))
+    matches!(
+        dir.as_str(),
+        "track" | "vehicles" | "palettes" | "sfx" | "gfx" | "sounds" | "music"
+    )
+    .then(|| format!("{dir}/{name}"))
 }
 
 /// Unpacks CrunchMania data, passing plain data through untouched.
@@ -144,6 +146,12 @@ pub struct GameData {
     pub tracks: Vec<TrackEntry>,
     pub track_files: Vec<TrackFile>,
     pub vehicles: Vec<Vehicle>,
+    /// Sound effects by lower-case name (`motor3`, `screech2`, ...).
+    pub sounds: BTreeMap<String, Sound>,
+    /// The tune as an OctaMED module, and the name it is stored under.
+    pub music: Option<(String, Vec<u8>)>,
+    /// Pictures by lower-case name (`skidtoon`, ...).
+    pub pictures: BTreeMap<String, Picture>,
     pub files: FileSet,
     pub warnings: Vec<String>,
 }
@@ -151,7 +159,17 @@ pub struct GameData {
 impl GameData {
     /// Loads the built-in data, overlaid with whatever is under `dir`.
     pub fn load(dir: Option<&Path>) -> Result<GameData, String> {
-        let mut files = FileSet::embedded();
+        Self::load_from(dir, true)
+    }
+
+    /// As `load`, optionally without the built-in data (used when
+    /// converting original disks, so the old assets do not shadow them).
+    pub fn load_from(dir: Option<&Path>, built_in: bool) -> Result<GameData, String> {
+        let mut files = if built_in {
+            FileSet::embedded()
+        } else {
+            FileSet::default()
+        };
         if let Some(dir) = dir {
             files.scan(dir);
         }
@@ -205,6 +223,7 @@ impl GameData {
             let Some(id) = key
                 .strip_prefix("vehicles/")
                 .and_then(|n| n.strip_suffix(".png"))
+                .filter(|n| !n.ends_with("-menu"))
             else {
                 continue;
             };
@@ -212,7 +231,14 @@ impl GameData {
                 .get(&format!("vehicles/{id}.txt"))
                 .map(String::from_utf8_lossy);
             match Vehicle::from_assets(id, data, txt.as_deref()) {
-                Ok(v) => vehicles.push(v),
+                Ok(mut v) => {
+                    if let Some(png) = files.get(&format!("vehicles/{id}-menu.png")) {
+                        if let Err(e) = v.set_menu_png(png) {
+                            warnings.push(format!("vehicles/{id}-menu.png: {e}"));
+                        }
+                    }
+                    vehicles.push(v)
+                }
                 Err(e) => warnings.push(format!("{key}: {e}")),
             }
         }
@@ -227,7 +253,14 @@ impl GameData {
                 continue;
             }
             match Vehicle::parse(name, data) {
-                Ok(Some(v)) => vehicles.push(v),
+                Ok(Some(mut v)) => {
+                    if let Some(set) = files.get(&format!("vehicles/{}.set", v.id)) {
+                        if let Err(e) = v.apply_set(set) {
+                            warnings.push(format!("vehicles/{}.set: {e}", v.id));
+                        }
+                    }
+                    vehicles.push(v)
+                }
                 Ok(None) => warnings.push(format!("{key}: sprite data is blank, skipped")),
                 Err(e) => warnings.push(format!("{key}: {e}")),
             }
@@ -248,10 +281,14 @@ impl GameData {
                 }
             ));
         }
+        let (sounds, music, pictures) = load_media(&files, &mut warnings);
         Ok(GameData {
             tracks,
             track_files,
             vehicles,
+            sounds,
+            music,
+            pictures,
             files,
             warnings,
         })
@@ -262,8 +299,14 @@ impl GameData {
         let mut t = match &entry.source {
             TrackSource::Asset { png, txt } => {
                 let txt = String::from_utf8_lossy(self.files.get(txt).unwrap_or_default());
-                Track::from_assets(&entry.name, self.files.get(png).unwrap_or_default(), &txt)
-                    .map_err(|e| format!("{}: {e}", entry.name))?
+                let mut t =
+                    Track::from_assets(&entry.name, self.files.get(png).unwrap_or_default(), &txt)
+                        .map_err(|e| format!("{}: {e}", entry.name))?;
+                let thumb = png.replace("/track.png", "/thumb.png");
+                if let Some(d) = self.files.get(&thumb) {
+                    t.set_thumb_png(d).map_err(|e| format!("{thumb}: {e}"))?;
+                }
+                t
             }
             TrackSource::Packed { file, section } => self.track_files[*file].decode(*section)?,
         };
@@ -272,6 +315,115 @@ impl GameData {
         }
         Ok(t)
     }
+}
+
+type Media = (
+    BTreeMap<String, Sound>,
+    Option<(String, Vec<u8>)>,
+    BTreeMap<String, Picture>,
+);
+
+/// Sounds, music and pictures. Assets (`sounds/*.wav`, `music/*.med`,
+/// `gfx/*.png`) win over the originals (`sfx/` and `gfx/` IFF files, and the
+/// CrunchMania-packed tune).
+fn load_media(files: &FileSet, warnings: &mut Vec<String>) -> Media {
+    let stem = |key: &str, dir: &str, ext: &str| -> Option<String> {
+        let name = key.strip_prefix(dir)?.strip_prefix('/')?;
+        name.strip_suffix(ext).map(str::to_string)
+    };
+    let mut sounds = BTreeMap::new();
+    // Lowest priority first; later inserts replace earlier ones.
+    for dir in ["gfx", "sfx"] {
+        for (key, data) in &files.files {
+            if let Some(name) = stem(key, dir, ".iff") {
+                if iff::is_8svx(data) {
+                    match iff::read_8svx(data) {
+                        Ok(s) => {
+                            sounds.insert(name, s);
+                        }
+                        Err(e) => warnings.push(format!("{key}: {e}")),
+                    }
+                }
+            }
+        }
+    }
+    for (key, data) in &files.files {
+        if let Some(name) = stem(key, "sounds", ".wav") {
+            match iff::wav_to_sound(data) {
+                Ok(s) => {
+                    sounds.insert(name, s);
+                }
+                Err(e) => warnings.push(format!("{key}: {e}")),
+            }
+        }
+    }
+
+    let mut music = None;
+    for (key, data) in &files.files {
+        if let Some(name) = stem(key, "sfx", ".crn") {
+            match unpack(data) {
+                Ok(d) if med::is_med(&d) => music = Some((name, d)),
+                Ok(_) => warnings.push(format!("{key}: not an OctaMED module")),
+                Err(e) => warnings.push(format!("{key}: {e}")),
+            }
+        }
+    }
+    if let Some((key, data)) = files
+        .files
+        .iter()
+        .find(|(k, _)| k.starts_with("music/") && k.ends_with(".med"))
+    {
+        music = Some((stem(key, "music", ".med").unwrap_or_default(), data.clone()));
+    }
+
+    let mut pictures = BTreeMap::new();
+    for (key, data) in &files.files {
+        if let Some(name) = stem(key, "gfx", ".iff") {
+            if data.get(8..12) == Some(b"ILBM") {
+                match iff::read_ilbm(data) {
+                    Ok(p) => {
+                        pictures.insert(name, p);
+                    }
+                    Err(e) => warnings.push(format!("{key}: {e}")),
+                }
+            }
+        }
+    }
+    for (key, data) in &files.files {
+        if let Some(name) = stem(key, "gfx", ".spr") {
+            match iff::read_sprite_bank(data) {
+                Ok(p) => {
+                    pictures.insert(name, p);
+                }
+                Err(e) => warnings.push(format!("{key}: {e}")),
+            }
+        }
+    }
+    for (key, data) in &files.files {
+        if let Some(name) = stem(key, "gfx", ".png") {
+            match image::read_indexed(data, &palette::TRACK_DEFAULT) {
+                Ok(img) => {
+                    let palette = img
+                        .palette
+                        .unwrap_or_default()
+                        .iter()
+                        .map(|c| (c.0, c.1, c.2))
+                        .collect();
+                    pictures.insert(
+                        name,
+                        Picture {
+                            w: img.w,
+                            h: img.h,
+                            pixels: img.pixels,
+                            palette,
+                        },
+                    );
+                }
+                Err(e) => warnings.push(format!("{key}: {e}")),
+            }
+        }
+    }
+    (sounds, music, pictures)
 }
 
 /// Sort key that orders TRACK2-10 after TRACK2-9.

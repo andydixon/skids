@@ -3,6 +3,14 @@
 //! File layout:
 //!   0x00  7 x BE32 end offsets. Section 0 runs from 0x1c to the first offset
 //!         and holds the selector thumbnails; sections 1..6 are tracks.
+//!         Section 0 starts with the selector thumbnails: a 640x64 16-colour
+//!         picture, four bitplanes one after another (80 bytes per row), with
+//!         the six tracks' 123x32 thumbnails in a 3x2 grid at its top left.
+//!         Its pixels are Amiga hi-res, so each shows at 123x64 on screen.
+//!         The last 142 bytes of section 0 are: BE16 file number, the 16
+//!         colour palette shared by all six tracks as 48 BE16 values (R, G, B
+//!         per colour, 0-15 each), 12 bytes of unknown settings, then the
+//!         name of the set of tracks, NUL-terminated.
 //!
 //! Each track section (281240 bytes once decrunched):
 //!   0x0000  height map, 64x64 BE16 8.8 fixed point, one cell per 16x8 pixels
@@ -46,9 +54,16 @@ pub fn on_screen(sx: f32, sy: f32, margin: f32) -> bool {
     sx >= margin && sy >= margin && sx < W as f32 - margin && sy < H as f32 - margin
 }
 
+pub const THUMB_W: usize = 123;
+pub const THUMB_H: usize = 32;
+
 pub struct TrackFile {
     pub name: String,
     pub number: u32,
+    pub palette: [Rgb; 16],
+    pub set_name: String,
+    /// The six selector thumbnails, THUMB_W x THUMB_H palette indices each.
+    pub thumbnails: Vec<Vec<u8>>,
     /// Packed track sections (index 0 = first playable track).
     pub sections: Vec<Vec<u8>>,
 }
@@ -67,6 +82,10 @@ impl Gate {
 
 pub struct Track {
     pub name: String,
+    /// The set of six tracks this one belongs to.
+    pub set_name: String,
+    /// The original selector thumbnail, THUMB_W x THUMB_H palette indices.
+    pub thumbnail: Option<Vec<u8>>,
     /// Palette indices, W x H.
     pub pixels: Vec<u8>,
     pub palette: [Rgb; 16],
@@ -104,9 +123,16 @@ impl TrackFile {
             .trim_start_matches(|c: char| !c.is_ascii_digit())
             .parse()
             .unwrap_or(u32::MAX);
+        let header = &d[SECTIONS * 4..ends[0]];
+        let thumbnails = thumbnails(header);
+        let (palette, set_name) =
+            file_header(header).unwrap_or((palette::TRACK_DEFAULT, String::new()));
         Ok(TrackFile {
             name: name.to_string(),
             number,
+            palette,
+            set_name,
+            thumbnails,
             sections,
         })
     }
@@ -117,8 +143,52 @@ impl TrackFile {
 
     pub fn decode(&self, section: usize) -> Result<Track, String> {
         let raw = unpack(&self.sections[section]).map_err(|e| e.to_string())?;
-        Track::from_section(self.track_name(section), &raw)
+        let mut t = Track::from_section(self.track_name(section), &raw)?;
+        t.palette = self.palette;
+        t.set_name = self.set_name.clone();
+        t.thumbnail = self.thumbnails.get(section).cloned();
+        Ok(t)
     }
+}
+
+/// The six thumbnails from the start of section 0.
+fn thumbnails(s: &[u8]) -> Vec<Vec<u8>> {
+    const ROW: usize = 80;
+    const ROWS: usize = 64;
+    let plane = ROW * ROWS;
+    if s.len() < plane * 4 {
+        return Vec::new();
+    }
+    let px = |x: usize, y: usize| -> u8 {
+        (0..4)
+            .map(|p| ((s[p * plane + y * ROW + x / 8] >> (7 - x % 8)) & 1) << p)
+            .sum()
+    };
+    (0..6)
+        .map(|i| {
+            let (ox, oy) = ((i % 3) * THUMB_W, (i / 3) * THUMB_H);
+            let mut t = Vec::with_capacity(THUMB_W * THUMB_H);
+            for y in 0..THUMB_H {
+                for x in 0..THUMB_W {
+                    t.push(px(ox + x, oy + y));
+                }
+            }
+            t
+        })
+        .collect()
+}
+
+/// Palette and set name from the tail of section 0.
+fn file_header(s: &[u8]) -> Option<([Rgb; 16], String)> {
+    let tail = s.get(s.len().checked_sub(142)?..)?;
+    let mut pal = [Rgb(0, 0, 0); 16];
+    for (i, c) in pal.iter_mut().enumerate() {
+        let v = |k: usize| (be16(tail, 2 + (i * 3 + k) * 2).min(15) * 17) as u8;
+        *c = Rgb(v(0), v(1), v(2));
+    }
+    let name = &tail[110..];
+    let end = name.iter().position(|&b| b == 0).unwrap_or(name.len());
+    Some((pal, crate::formats::latin1(&name[..end]).trim().to_string()))
 }
 
 impl Track {
@@ -168,6 +238,8 @@ impl Track {
             name,
             pixels,
             palette: palette::TRACK_DEFAULT,
+            set_name: String::new(),
+            thumbnail: None,
             height,
             gates,
             start,
@@ -236,6 +308,7 @@ impl Track {
         let mut gates = Vec::new();
         let mut start = (0.0, 0.0);
         let mut flags = 0;
+        let mut set_name = String::new();
         let mut height = Vec::with_capacity(HM_W * HM_H);
         let mut in_height = false;
         for (n, line) in txt.lines().enumerate() {
@@ -287,6 +360,7 @@ impl Track {
                         .ok_or_else(|| err("bad flags"))?
                 }
                 "height" => in_height = true,
+                "set" => set_name = line[3..].trim().to_string(),
                 other => return Err(err(&format!("unknown entry `{other}`"))),
             }
         }
@@ -304,11 +378,31 @@ impl Track {
             name: name.to_string(),
             pixels: img.pixels,
             palette: pal,
+            set_name,
+            thumbnail: None,
             height,
             gates,
             start,
             flags,
         })
+    }
+
+    /// The thumbnail as an indexed PNG in the track's palette.
+    pub fn thumb_png(&self) -> Option<Result<Vec<u8>, String>> {
+        self.thumbnail
+            .as_ref()
+            .map(|t| image::write_indexed(THUMB_W, THUMB_H, &self.palette, false, t))
+    }
+
+    pub fn set_thumb_png(&mut self, png: &[u8]) -> Result<(), String> {
+        let img = image::read_indexed(png, &self.palette)?;
+        if (img.w, img.h) != (THUMB_W, THUMB_H) || img.pixels.iter().any(|&p| p > 15) {
+            return Err(format!(
+                "thumb.png must be {THUMB_W}x{THUMB_H} using colours 0-15"
+            ));
+        }
+        self.thumbnail = Some(img.pixels);
+        Ok(())
     }
 
     pub fn to_png(&self) -> Result<Vec<u8>, String> {
@@ -331,10 +425,11 @@ impl Track {
             t.push_str(&format!("gate {} {} {} {}\n", g.a.0, g.a.1, g.b.0, g.b.1));
         }
         t.push_str(&format!(
-            "\n# As stored in the original data; not used by the game.\nstart {} {}\nflags {}\n\n\
+            "\n# Name of the set of tracks this one belongs to, shown in the menu.\nset {}\n\n\
+             # As stored in the original data; not used by the game.\nstart {} {}\nflags {}\n\n\
              # height: 64 rows of 64 values, ground height x 256. Each value covers\n\
              # 16x8 pixels of the picture.\nheight\n",
-            self.start.0, self.start.1, self.flags
+            self.set_name, self.start.0, self.start.1, self.flags
         ));
         for row in self.height.chunks(HM_W) {
             let line: Vec<String> = row.iter().map(|v| v.to_string()).collect();

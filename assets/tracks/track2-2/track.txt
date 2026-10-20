@@ -33,6 +33,9 @@ gate 622.375 910.5 544.6875 822.6875
 gate 508.6875 934.5 481.71875 820.71875
 gate 418 903.5 421.75 805.75
 
+# Name of the set of tracks this one belongs to, shown in the menu.
+set Even Flow
+
 # As stored in the original data; not used by the game.
 start 339 117
 flags 1
