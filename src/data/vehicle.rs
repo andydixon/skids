@@ -44,10 +44,10 @@ pub const SHEET_H: usize = SPR_H * TILTS;
 /// | 2 | steering rate |
 /// | 3 | read into the car but never used |
 /// | 4 | gravity |
-/// | 6 | tow hitch distance behind the car |
+/// | 6, 7 | half the car's length and width, for collisions; the tow hitch is at the back |
 /// | 8, 9, 10 | human drivers' drag, grip and power |
 ///
-/// Words 7 and 11-15 aren't read.
+/// Words 11-15 aren't read.
 pub type SetValues = [u16; 16];
 
 /// The Camaro's values, for vehicles that come without any.
@@ -80,15 +80,15 @@ pub struct Spec {
     pub turn: f32,
     /// Pixels per frame per frame.
     pub gravity: f32,
-    /// Tow hitch distance behind the car's centre, world units.
-    pub hitch: f32,
-    /// Weight in collisions between cars. Not from the original data.
-    pub mass: f32,
+    /// Half the car's length and width, world units. The tow hitch is
+    /// `half_length` behind the centre.
+    pub half_length: f32,
+    pub half_width: f32,
 }
 
 impl Spec {
     /// Decodes the values as the executable does (fixed-point shifts).
-    pub fn from_set(v: &SetValues, mass: f32) -> Spec {
+    pub fn from_set(v: &SetValues) -> Spec {
         let f = |k: usize, shift: u32| v[k] as i16 as f32 / (1u32 << shift) as f32;
         Spec {
             player: Handling {
@@ -103,8 +103,8 @@ impl Spec {
             },
             turn: f(2, 4),
             gravity: f(4, 3),
-            hitch: f(6, 5) * super::track::CELL,
-            mass,
+            half_length: f(6, 5) * super::track::CELL,
+            half_width: f(7, 5) * super::track::CELL,
         }
     }
 }
@@ -153,20 +153,6 @@ impl Spec {
     }
 }
 
-/// Collision weight. The original's car-to-car physics isn't decoded, so
-/// these are guesses.
-pub fn default_mass(id: &str) -> f32 {
-    match id {
-        "f1" => 0.9,
-        "mini" => 0.8,
-        "midget" => 0.85,
-        "truck" => 1.8,
-        "police" => 1.2,
-        "cow" => 1.4,
-        _ => 1.0,
-    }
-}
-
 pub struct Vehicle {
     pub id: String,
     pub name: String,
@@ -212,7 +198,7 @@ impl Vehicle {
             trailer: id == "caravan",
             set: DEFAULT_SET,
             menu_picture: None,
-            spec: Spec::from_set(&DEFAULT_SET, default_mass(&id)),
+            spec: Spec::from_set(&DEFAULT_SET),
             id,
             frames,
         }))
@@ -235,7 +221,7 @@ impl Vehicle {
         for (i, v) in self.set.iter_mut().enumerate() {
             *v = crate::formats::be16(body, i * 2);
         }
-        self.spec = Spec::from_set(&self.set, self.spec.mass);
+        self.spec = Spec::from_set(&self.set);
         let pic = &body[32..32 + 512];
         let mut px = vec![0u8; SPR_W * SPR_H];
         for (i, p) in px.iter_mut().enumerate() {
@@ -293,7 +279,7 @@ impl Vehicle {
             trailer: id == "caravan",
             set: DEFAULT_SET,
             menu_picture: None,
-            spec: Spec::from_set(&DEFAULT_SET, default_mass(id)),
+            spec: Spec::from_set(&DEFAULT_SET),
             frames,
         };
         if let Some(txt) = txt {
@@ -329,12 +315,11 @@ impl Vehicle {
              # original game does. Counting from 1:\n\
              #   1 2 6    computer drivers: drag, grip, power\n\
              #   9 10 11  human drivers: drag, grip, power\n\
-             #   3 steering, 5 gravity, 7 tow hitch distance; the rest are unused.\n\
+             #   3 steering, 5 gravity, 7 and 8 half the car's length and width\n\
+             #   (for collisions; the tow hitch is at the back). The rest are unused.\n\
              # Top speed = power * drag / (64 - drag) / 32 world units per frame,\n\
              # 50 frames a second (drag below 64). Higher grip, less sliding.\n\
-             handling {set}\n\
-             # weight when cars collide (not from the original data)\n\
-             mass {mass}\n",
+             handling {set}\n",
             id = self.id,
             name = self.name,
             driver = self.driver,
@@ -345,7 +330,6 @@ impl Vehicle {
                 .map(|v| v.to_string())
                 .collect::<Vec<_>>()
                 .join(" "),
-            mass = self.spec.mass,
         )
     }
 
@@ -375,18 +359,12 @@ impl Vehicle {
                     self.set = [0; 16];
                     self.set[..vals.len()].copy_from_slice(&vals);
                 }
-                "mass" => {
-                    self.spec.mass = val
-                        .parse::<f32>()
-                        .map_err(|_| bad(&format!("`{val}` is not a number")))?
-                        .max(0.05)
-                }
                 // Settings from before the original handling was decoded.
-                "top" | "accel" | "brake" | "grip" | "turn" | "offroad" => {}
+                "top" | "accel" | "brake" | "grip" | "turn" | "offroad" | "mass" => {}
                 _ => return Err(bad(&format!("unknown setting `{key}`"))),
             }
         }
-        self.spec = Spec::from_set(&self.set, self.spec.mass);
+        self.spec = Spec::from_set(&self.set);
         Ok(())
     }
 
@@ -451,13 +429,13 @@ mod tests {
             trailer: false,
             set: DEFAULT_SET,
             menu_picture: None,
-            spec: Spec::from_set(&DEFAULT_SET, 1.0),
+            spec: Spec::from_set(&DEFAULT_SET),
             frames,
         };
         let mut v = blank(vec![0; TILTS * HEADINGS * SPR_W * SPR_H]);
         v.driver = "SIMON".into();
         v.set = [60, 71, 30, 0, 6, 16, 24, 12, 58, 42, 29, 0, 0, 0, 0, 0];
-        v.spec = Spec::from_set(&v.set, 0.9);
+        v.spec = Spec::from_set(&v.set);
         v.name = "FORMULA 1".into();
         let txt = v.settings_text();
         let mut w = blank(Vec::new());
@@ -466,7 +444,7 @@ mod tests {
         assert_eq!(w.name, "FORMULA 1");
         assert_eq!(w.driver, "SIMON");
         assert_eq!(w.set, v.set);
-        assert!(w.apply_settings("mass heavy").is_err());
+        assert!(w.apply_settings("handling 1 x").is_err());
         // Older files with reconstructed handling still load.
         assert!(w.apply_settings("original 1 2 3\ntop 200").is_ok());
         assert_eq!(&w.set[..4], &[1, 2, 3, 0]);
@@ -474,11 +452,11 @@ mod tests {
 
     #[test]
     fn decodes_set_values() {
-        let s = Spec::from_set(&DEFAULT_SET, 1.0);
+        let s = Spec::from_set(&DEFAULT_SET);
         assert_eq!(s.player.drag, 49.0 / 64.0);
         assert_eq!(s.computer.power, 22.0 / 512.0);
         assert_eq!(s.turn, 2.0);
-        assert_eq!(s.hitch, 11.0);
+        assert_eq!((s.half_length, s.half_width), (11.0, 8.0));
         let p = s.with_preset(1);
         let top = p.player.power * p.player.drag / (1.0 - p.player.drag);
         assert!((top - 26.0 / 128.0).abs() < 1e-5);

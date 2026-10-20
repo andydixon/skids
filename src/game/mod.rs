@@ -5,8 +5,8 @@ pub mod car;
 
 use crate::data::track::{Gate, Track};
 use crate::data::vehicle::Vehicle;
-use ai::Ai;
-use car::{Car, Controls};
+use ai::{Ai, Path};
+use car::{Body, Car, Controls};
 
 pub const DT: f32 = 1.0 / 50.0;
 const COUNTDOWN: f32 = 3.0;
@@ -43,13 +43,18 @@ pub struct Trailer {
     pub vehicle: usize,
     pub x: f32,
     pub y: f32,
+    /// World units per second, from how far it was dragged this frame.
+    pub vx: f32,
+    pub vy: f32,
+    /// Pointing at the hitch.
     pub heading: f32,
 }
 
-/// Tow bar length from the car's hitch (`Spec::hitch`) to the trailer's
-/// centre, in world units.
-const TOW_BAR: f32 = 20.0;
-const TRAILER_RADIUS: f32 = 10.0;
+/// From the car's hitch (at the back of the car, `Spec::half_length`
+/// behind its centre) to the trailer's centre: 0.656 game units.
+const TOW_BAR: f32 = 10.5;
+/// The most a trailer can swing round from its car before both bend.
+const JACKKNIFE: f32 = std::f32::consts::FRAC_PI_2;
 /// Seconds without crossing a gate before a computer car is rescued.
 const RESCUE_AFTER: f32 = 8.0;
 
@@ -65,7 +70,7 @@ fn rescue(e: &mut Entrant, track: &Track) {
     c.heading = heading.rem_euclid(std::f32::consts::TAU);
     c.place(track);
     if let Some(t) = &mut e.trailer {
-        let back = c.spec.hitch + TOW_BAR;
+        let back = c.spec.half_length + TOW_BAR;
         t.x = from.0 - heading.cos() * back;
         t.y = from.1 - heading.sin() * back;
         t.heading = heading;
@@ -73,16 +78,40 @@ fn rescue(e: &mut Entrant, track: &Track) {
 }
 
 impl Trailer {
-    /// Drags the trailer after its car: it keeps its distance from the
-    /// hitch and swings to point at it.
-    fn follow(&mut self, car: &Car) {
+    /// Drags the trailer after its car, as the executable does: it turns
+    /// to point at the hitch and sits a tow bar's length behind it. If it
+    /// ends up more than 90 degrees from the car, both are bent back to 45
+    /// degrees either side of the angle between them.
+    fn follow(&mut self, car: &mut Car) {
         let (fx, fy) = car.forward();
-        let (hx, hy) = (car.x - fx * car.spec.hitch, car.y - fy * car.spec.hitch);
-        let (dx, dy) = (self.x - hx, self.y - hy);
-        let d = dx.hypot(dy).max(1e-3);
-        self.x = hx + dx / d * TOW_BAR;
-        self.y = hy + dy / d * TOW_BAR;
+        let (hx, hy) = (
+            car.x - fx * car.spec.half_length,
+            car.y - fy * car.spec.half_length,
+        );
         self.heading = (hy - self.y).atan2(hx - self.x);
+        let d = car::angle_diff(self.heading, car.heading);
+        if d.abs() > JACKKNIFE {
+            let mid = car.heading + d * 0.5;
+            let half = JACKKNIFE * 0.5 * d.signum();
+            self.heading = mid + half;
+            car.heading = (mid - half).rem_euclid(std::f32::consts::TAU);
+        }
+        let (ox, oy) = (self.x, self.y);
+        self.x = hx - self.heading.cos() * TOW_BAR;
+        self.y = hy - self.heading.sin() * TOW_BAR;
+        self.vx = (self.x - ox) / DT;
+        self.vy = (self.y - oy) / DT;
+    }
+
+    fn body(&self, track: &Track) -> Body {
+        Body {
+            x: self.x,
+            y: self.y,
+            z: track.ground(self.x, self.y),
+            vx: self.vx,
+            vy: self.vy,
+            heading: self.heading,
+        }
     }
 }
 
@@ -101,6 +130,8 @@ pub enum Phase {
 
 pub struct Race {
     pub track: Track,
+    /// The computer drivers' path.
+    pub path: Path,
     pub entrants: Vec<Entrant>,
     pub laps: usize,
     pub time: f32,
@@ -146,7 +177,7 @@ impl Race {
         let start_gate = 0;
         let path: Vec<(f32, f32)> = gates.iter().map(Gate::mid).collect();
 
-        let mut rng = seed | 1;
+        let rng = seed | 1;
         let mut entrants = Vec::new();
         for (i, s) in setup.iter().enumerate() {
             // Two-wide grid, rows 30 units apart, following the road back
@@ -156,7 +187,7 @@ impl Race {
             // Leave room for a caravan between rows when towing.
             let spec = vehicles[s.vehicle].spec.with_preset(s.preset);
             let spacing = if s.trailer.is_some() {
-                30.0 + spec.hitch + TOW_BAR + TRAILER_RADIUS
+                30.0 + spec.half_length + TOW_BAR + 10.0
             } else {
                 30.0
             };
@@ -166,12 +197,10 @@ impl Race {
             let mut car = Car::new(s.vehicle, spec, s.team, x, y, heading);
             car.computer = s.driver == Driver::Cpu;
             car.place(&track);
-            let line = 0.3 + 0.4 * rand01(&mut rng);
-            let pace = 0.86 + 0.12 * rand01(&mut rng);
             entrants.push(Entrant {
                 car,
                 driver: s.driver,
-                ai: Ai::new(line, pace),
+                ai: Ai::new(),
                 name: s.name.clone(),
                 passed: 0,
                 next_gate: start_gate,
@@ -182,11 +211,13 @@ impl Race {
                 progress_at: 0.0,
                 trailer: s.trailer.map(|t| {
                     let (fx, fy) = (heading.cos(), heading.sin());
-                    let back = spec.hitch + TOW_BAR;
+                    let back = spec.half_length + TOW_BAR;
                     Trailer {
                         vehicle: t,
                         x: x - fx * back,
                         y: y - fy * back,
+                        vx: 0.0,
+                        vy: 0.0,
                         heading,
                     }
                 }),
@@ -194,6 +225,7 @@ impl Race {
         }
         let ground = track.rgb();
         Race {
+            path: Path::new(&track.edges),
             track,
             entrants,
             laps,
@@ -235,10 +267,10 @@ impl Race {
 
         for e in self.entrants.iter_mut() {
             let controls = match (e.driver, e.finished) {
-                (_, Some(_)) => e.ai.drive(&e.car, &self.track, DT, racing),
+                (_, Some(_)) => e.ai.drive(&e.car, &self.path, DT, racing),
                 (Driver::Human(p), None) if racing => human.get(p).copied().unwrap_or_default(),
                 (Driver::Human(_), None) => Controls::default(),
-                (Driver::Cpu, None) => e.ai.drive(&e.car, &self.track, DT, racing),
+                (Driver::Cpu, None) => e.ai.drive(&e.car, &self.path, DT, racing),
             };
             e.car.controls = controls;
             // Finished cars cruise round on autopilot at reduced pace.
@@ -246,24 +278,34 @@ impl Race {
             e.car.step(&self.track, pace);
         }
 
-        for i in 0..self.entrants.len() {
-            for j in i + 1..self.entrants.len() {
-                let (a, b) = self.entrants.split_at_mut(j);
-                car::collide(&mut a[i].car, &mut b[0].car);
+        for e in self.entrants.iter_mut() {
+            if let Some(t) = &mut e.trailer {
+                t.follow(&mut e.car);
             }
         }
-        // Caravans follow their cars and shove other cars out of the way.
+        // As in the executable, only the human players' cars collide: each
+        // is tested against every other car and caravan but its own.
+        // Computer cars pass through each other and through caravans.
         for i in 0..self.entrants.len() {
-            let Some(mut t) = self.entrants[i].trailer else {
+            if !matches!(self.entrants[i].driver, Driver::Human(_)) {
                 continue;
-            };
-            t.follow(&self.entrants[i].car);
-            for (j, other) in self.entrants.iter_mut().enumerate() {
-                if j != i {
-                    push_off(&mut other.car, t.x, t.y);
+            }
+            for j in 0..self.entrants.len() {
+                if j == i {
+                    continue;
+                }
+                let other = self.entrants[j].car.body();
+                if let Some((dx, dy)) = car::bump(&mut self.entrants[i].car, &other) {
+                    let knock = self.entrants[i].car.bump;
+                    let b = &mut self.entrants[j].car;
+                    b.vx += dx;
+                    b.vy += dy;
+                    b.bump = b.bump.max(knock);
+                }
+                if let Some(t) = self.entrants[j].trailer {
+                    car::bump(&mut self.entrants[i].car, &t.body(&self.track));
                 }
             }
-            self.entrants[i].trailer = Some(t);
         }
 
         for (e, &(px, py)) in self.entrants.iter_mut().zip(&starts) {
@@ -385,26 +427,6 @@ impl Car {
     }
 }
 
-/// Moves a car out of a caravan it has run into, killing the speed it had
-/// into it.
-fn push_off(c: &mut Car, tx: f32, ty: f32) {
-    let (dx, dy) = (c.x - tx, c.y - ty);
-    let d = dx.hypot(dy);
-    let min = car::RADIUS + TRAILER_RADIUS;
-    if d >= min || d < 1e-3 {
-        return;
-    }
-    let (nx, ny) = (dx / d, dy / d);
-    c.x += nx * (min - d);
-    c.y += ny * (min - d);
-    let vn = c.vx * nx + c.vy * ny;
-    if vn < 0.0 {
-        c.vx -= vn * nx * 1.3;
-        c.vy -= vn * ny * 1.3;
-        c.bump = c.bump.max((-vn / 150.0).min(1.0));
-    }
-}
-
 fn burn(ground: &mut [u32], sx: f32, sy: f32, strength: f32) {
     use crate::data::track::{H, W};
     let (x, y) = (sx as isize, sy as isize);
@@ -511,7 +533,7 @@ mod tests {
             start: (0.0, 0.0),
             flags: 0,
         };
-        let spec = crate::data::vehicle::Spec::from_set(&crate::data::vehicle::DEFAULT_SET, 1.0);
+        let spec = crate::data::vehicle::Spec::from_set(&crate::data::vehicle::DEFAULT_SET);
         let mut c = Car::new(0, spec, 0, 512.0 + 180.0, 512.0, 0.0);
         c.place(&track);
         // Flat out in a straight line: the outer wall turns the car back.
@@ -521,5 +543,49 @@ mod tests {
             let r = (c.x - 512.0).hypot(c.y - 512.0);
             assert!(r > 140.0 && r < 215.0, "left the road at radius {r}");
         }
+    }
+
+    fn test_car(x: f32, y: f32, heading: f32) -> Car {
+        let spec = crate::data::vehicle::Spec::from_set(&crate::data::vehicle::DEFAULT_SET);
+        Car::new(0, spec, 0, x, y, heading)
+    }
+
+    #[test]
+    fn bump_pushes_cars_apart() {
+        // Side by side, overlapping: b is pushed away along +y, a along -y.
+        let mut a = test_car(100.0, 100.0, 0.0);
+        let b = test_car(100.0, 110.0, 0.0);
+        let (dx, dy) = car::bump(&mut a, &b.body()).expect("they overlap");
+        assert!(dy > 0.0 && dx.abs() < 1e-3);
+        assert!(a.vy < 0.0);
+        // Too far apart, or one on a bridge above the other.
+        let mut a = test_car(100.0, 100.0, 0.0);
+        assert!(car::bump(&mut a, &test_car(100.0, 140.0, 0.0).body()).is_none());
+        let mut high = test_car(100.0, 110.0, 0.0);
+        high.z = 20.0;
+        assert!(car::bump(&mut a, &high.body()).is_none());
+    }
+
+    #[test]
+    fn trailer_jackknife_bends_both() {
+        let mut c = test_car(100.0, 100.0, 0.0);
+        // A trailer straight out to the side of the car.
+        let mut t = Trailer {
+            vehicle: 0,
+            x: 89.0,
+            y: 130.0,
+            vx: 0.0,
+            vy: 0.0,
+            heading: 0.0,
+        };
+        t.follow(&mut c);
+        let d = car::angle_diff(t.heading, c.heading).abs();
+        assert!((d - JACKKNIFE).abs() < 1e-4, "{d}");
+        // It sits a tow bar's length from the hitch.
+        let (hx, hy) = (
+            c.x - c.heading.cos() * c.spec.half_length,
+            c.y - c.heading.sin() * c.spec.half_length,
+        );
+        assert!(((t.x - hx).hypot(t.y - hy) - TOW_BAR).abs() < 1e-3);
     }
 }
