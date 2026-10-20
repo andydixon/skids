@@ -44,7 +44,8 @@ give either to also gets the game data.
 - The original title picture.
 - 1 or 2 players (split screen) plus up to 7 computer drivers.
 - Power-slides, jumps, hills that slow you going up and speed you up coming
-  down, car-to-car bumping, and skid marks burnt into the track.
+  down, spinning bumps against other cars, and skid marks burnt into the
+  track.
 - Lap and position tracking, lap times, and a results table.
 - Engine note pitched with revs, tyre screech, crashes, backfires, a horn
   and start beeps, all from the original samples.
@@ -57,12 +58,14 @@ were decoded from its machine code and work the same way here:
 - the meaning of every `.set` value, and the handling presets
 - the walls along the road edges
 - how the world is projected onto the screen, including height
+- the computer drivers' path and how they choose their target and throttle
+- collisions between cars. As in the original, only human players' cars
+  collide: computer cars pass through each other and through caravans.
+- towing, including caravans jack-knifing
 
 The rest is new code written to feel like the original:
-- how computer drivers choose their line (they steer and drive as the
-  original's do)
-- car-to-car collisions
-- lap counting and the rescue of stuck cars
+- lap counting
+- the rescue of stuck cars (the original warps them back instead)
 
 [docs/FORMATS.md](docs/FORMATS.md) covers everything reverse engineered so
 far.

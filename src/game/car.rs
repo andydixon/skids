@@ -17,16 +17,16 @@
 //! - **Walls:** the road edges (`Track::edges`) are walls. A car that
 //!   reaches one loses the part of its velocity into the wall and bounces
 //!   back with half of it.
+//! - **Other cars:** see `bump`.
 //!
 //! Human and computer drivers use separate handling from the vehicle's
 //! `.set` values.
 
-use super::DT;
+pub use super::DT;
 use crate::data::track::{self, Gate, Track, CELL};
 use crate::data::vehicle::{self, Handling, Spec};
 use std::f32::consts::{PI, TAU};
 
-pub const RADIUS: f32 = 11.0;
 /// How close the car's centre may come to a wall, in world units.
 const WALL_MARGIN: f32 = 4.0;
 /// The executable samples the slope 0.2 cells from the car.
@@ -335,39 +335,93 @@ pub fn nearest_section(e: &[Gate], p: (f32, f32)) -> usize {
     }
 }
 
-/// Pushes overlapping cars apart and exchanges momentum.
-pub fn collide(a: &mut Car, b: &mut Car) {
-    let (dx, dy) = (b.x - a.x, b.y - a.y);
-    let d2 = dx * dx + dy * dy;
-    let min = RADIUS * 2.0;
-    if d2 >= min * min || d2 < 1e-6 {
-        return;
-    }
-    let d = d2.sqrt();
-    let (nx, ny) = (dx / d, dy / d);
-    let overlap = min - d;
-    let (ia, ib) = (1.0 / a.spec.mass, 1.0 / b.spec.mass);
-    let push = overlap / (ia + ib);
-    a.x -= nx * push * ia;
-    a.y -= ny * push * ia;
-    b.x += nx * push * ib;
-    b.y += ny * push * ib;
+/// Something a car can run into: another car or a caravan.
+#[derive(Clone, Copy, Debug)]
+pub struct Body {
+    pub x: f32,
+    pub y: f32,
+    pub z: f32,
+    pub vx: f32,
+    pub vy: f32,
+    pub heading: f32,
+}
 
-    let vn = (b.vx - a.vx) * nx + (b.vy - a.vy) * ny;
-    if vn < 0.0 {
-        let j = -(1.0 + 0.45) * vn / (ia + ib);
-        a.vx -= j * ia * nx;
-        a.vy -= j * ia * ny;
-        b.vx += j * ib * nx;
-        b.vy += j * ib * ny;
-        let hit = (-vn / 150.0).min(1.0);
-        a.bump = a.bump.max(hit);
-        b.bump = b.bump.max(hit);
-        // A glancing knock spins the cars a little.
-        let spin = (nx * a.forward().1 - ny * a.forward().0) * hit * 0.25;
-        a.heading = (a.heading + spin).rem_euclid(TAU);
-        b.heading = (b.heading - spin).rem_euclid(TAU);
+impl Car {
+    pub fn body(&self) -> Body {
+        Body {
+            x: self.x,
+            y: self.y,
+            z: self.z,
+            vx: self.vx,
+            vy: self.vy,
+            heading: self.heading,
+        }
     }
+}
+
+/// Half-width and half-length of the box that `bump` tests points against,
+/// world units. The executable uses the same box for every vehicle.
+const TARGET: (f32, f32) = (6.0, 12.0);
+
+/// The executable's collision (`$25e64`) between car `a` and `b`.
+///
+/// Six points on `a` are tested against `b`'s box: its four corners and a
+/// point on each side, 0.58 of the way out. Each point inside the box
+/// pushes the two apart along that point's offset from `a`'s centre, by
+/// k = 64 |relative speed|^2 + 20 (game units); the side points push 2.5
+/// times as hard. Each corner inside also spins `a` so that corner swings
+/// away. Returns the velocity change for `b` (world units per second);
+/// `a` has already received the opposite.
+pub fn bump(a: &mut Car, b: &Body) -> Option<(f32, f32)> {
+    // Cars more than two cells apart, or at different heights (on and
+    // under a bridge), can't touch.
+    if (a.x - b.x).abs() > 2.0 * CELL || (a.y - b.y).abs() > 2.0 * CELL || (a.z - b.z).abs() >= 17.0
+    {
+        return None;
+    }
+    let (dvx, dvy) = ((a.vx - b.vx) * DT / CELL, (a.vy - b.vy) * DT / CELL);
+    let k = 64.0 * (dvx * dvx + dvy * dvy) + 20.0;
+    let (fx, fy) = a.forward();
+    let (ux, uy) = (-fy, fx);
+    let (bfx, bfy) = (b.heading.cos(), b.heading.sin());
+    let (l, w) = (a.spec.half_length, a.spec.half_width);
+    let side = w * 0.58;
+    // (along, across, push factor)
+    let points = [
+        (l, w, 1.0),
+        (l, -w, 1.0),
+        (-l, -w, 1.0),
+        (-l, w, 1.0),
+        (0.0, side, 2.5),
+        (0.0, -side, 2.5),
+    ];
+    let (mut ix, mut iy, mut turn, mut hit) = (0.0, 0.0, 0.0, false);
+    for (along, across, factor) in points {
+        let (px, py) = (fx * along + ux * across, fy * along + uy * across);
+        let (rx, ry) = (a.x + px - b.x, a.y + py - b.y);
+        let b_along = rx * bfx + ry * bfy;
+        let b_across = ry * bfx - rx * bfy;
+        if b_across.abs() >= TARGET.0 || b_along.abs() >= TARGET.1 {
+            continue;
+        }
+        hit = true;
+        let push = k * factor / 256.0 / DT;
+        ix += px * push;
+        iy += py * push;
+        if factor == 1.0 {
+            turn -= (along * across).signum() * k / 16.0;
+        }
+    }
+    if !hit {
+        return None;
+    }
+    a.vx -= ix;
+    a.vy -= iy;
+    a.spin += turn;
+    a.heading = (a.heading + 2.0 * turn * TAU / 64.0).rem_euclid(TAU);
+    let knock = (dvx.hypot(dvy) * CELL / DT / 150.0).clamp(0.2, 1.0);
+    a.bump = a.bump.max(knock);
+    Some((ix, iy))
 }
 
 pub fn angle_diff(to: f32, from: f32) -> f32 {
