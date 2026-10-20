@@ -411,7 +411,7 @@ fn render_shot(data: GameData, args: &Args) -> Result<(), String> {
             .entrants
             .iter_mut()
             .filter(|e| matches!(e.driver, game::Driver::Human(_)))
-            .map(|e| e.ai.drive(&e.car, &race.track, game::DT, true))
+            .map(|e| e.ai.drive(&e.car, &race.path, game::DT, true))
             .collect();
         race.step(&controls);
         app::draw_race(&mut frame, &app.data, &race, &mut cams, players);
