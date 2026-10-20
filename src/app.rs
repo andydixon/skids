@@ -60,6 +60,8 @@ pub struct Settings {
     pub opponents: usize,
     /// Every car tows a caravan.
     pub caravans: bool,
+    /// 0 = each car's own handling, else a preset (`vehicle::PRESETS`).
+    pub handling: usize,
     pub music: Music,
 }
 
@@ -73,6 +75,7 @@ enum Item {
     Car2,
     Opponents,
     Caravans,
+    Handling,
     Music,
     Quit,
 }
@@ -150,6 +153,7 @@ impl App {
                 cars,
                 opponents: 3,
                 caravans: false,
+                handling: 0,
                 music,
             },
             screen: Screen::Menu { cursor: 0 },
@@ -179,6 +183,7 @@ impl App {
         if self.data.vehicles.iter().any(|v| v.trailer) {
             v.push(Item::Caravans);
         }
+        v.push(Item::Handling);
         if self.audio.has_music() {
             v.push(Item::Music);
         }
@@ -209,6 +214,7 @@ impl App {
                 team: p,
                 name: format!("PLAYER {}", p + 1),
                 trailer,
+                preset: self.settings.handling,
             });
         }
         let mut rng = seed.wrapping_mul(2654435761) | 1;
@@ -222,6 +228,7 @@ impl App {
                 team: humans + i,
                 name: CPU_NAMES[(i + seed as usize) % CPU_NAMES.len()].to_string(),
                 trailer,
+                preset: self.settings.handling,
             });
         }
         // Humans start at the back, as is tradition.
@@ -347,6 +354,7 @@ impl App {
                 }
                 Item::Opponents => s.opponents = wrap(s.opponents, 8 - s.players + 1, delta),
                 Item::Caravans => s.caravans = !s.caravans,
+                Item::Handling => s.handling = wrap(s.handling, vehicle::PRESETS.len() + 1, delta),
                 Item::Music => {
                     const ORDER: [Music; 3] = [Music::Menus, Music::Always, Music::Off];
                     let at = ORDER.iter().position(|&m| m == s.music).unwrap_or(0);
@@ -370,6 +378,7 @@ impl App {
                 | Item::Laps
                 | Item::Players
                 | Item::Caravans
+                | Item::Handling
                 | Item::Music
                 | Item::Opponents => {
                     let s = &self.settings;
@@ -505,6 +514,13 @@ impl App {
                 Item::Caravans => {
                     format!("CARAVANS   < {} >", if s.caravans { "ON" } else { "OFF" })
                 }
+                Item::Handling => format!(
+                    "HANDLING   < {} >",
+                    match s.handling {
+                        0 => "CUSTOM",
+                        n => vehicle::PRESETS[n - 1].0,
+                    }
+                ),
                 Item::Music => format!(
                     "MUSIC      < {} >",
                     match s.music {
@@ -729,7 +745,7 @@ pub fn draw_race(
         };
         let e = &race.entrants[ei];
         // Look ahead in the direction of travel.
-        let target = track::to_screen(e.car.x + e.car.vx * 0.3, e.car.y + e.car.vy * 0.3);
+        let target = track::project(e.car.x + e.car.vx * 0.3, e.car.y + e.car.vy * 0.3, e.car.z);
         cams[p].0 += (target.0 - cams[p].0) * 0.12;
         cams[p].1 += (target.1 - cams[p].1) * 0.12;
         draw_world(f, data, race, *view, &mut cams[p], false, 1.0);
@@ -774,7 +790,7 @@ pub fn draw_world(
     for (i, e) in race.entrants.iter().enumerate() {
         order.push((e.car.screen_pos().1, i, false));
         if let Some(t) = e.trailer {
-            order.push((track::to_screen(t.x, t.y).1, i, true));
+            order.push((race.track.to_screen(t.x, t.y).1, i, true));
         }
     }
     order.sort_by(|a, b| a.0.total_cmp(&b.0));
@@ -784,7 +800,7 @@ pub fn draw_world(
         let pal = palette::car_palette(c.team);
         if is_trailer {
             let t = e.trailer.unwrap();
-            let (sx, sy) = track::to_screen(t.x, t.y);
+            let (sx, sy) = race.track.to_screen(t.x, t.y);
             let x = view.x + sx as i32 - cx - (vehicle::SPR_W as i32 / 2);
             let y = view.y + sy as i32 - cy - (vehicle::SPR_H as i32 / 2);
             let pix =
